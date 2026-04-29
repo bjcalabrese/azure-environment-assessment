@@ -446,6 +446,61 @@ def collect_storage(credential, sub_id, sub_name, verbose=False):
     return rows
 
 
+def collect_file_shares(credential, sub_id, sub_name, verbose=False):
+    """Collect all Azure File Shares across every Storage Account in the subscription."""
+    rows = []
+    if _StorageClient is None:
+        return rows
+    try:
+        storage = _StorageClient(credential, sub_id)
+        for acct in safe_list(storage.storage_accounts.list()):
+            rg       = rg_from_id(acct.id)
+            location = acct.location or ""
+            sku      = acct.sku.name if acct.sku else ""
+            # SMB UNC path root for this account
+            smb_root = f"\\\\{acct.name}.file.core.windows.net"
+
+            try:
+                shares = safe_list(storage.file_shares.list(rg, acct.name))
+            except Exception:
+                continue  # account type doesn't support file shares (e.g. ADLS Gen2, BlobStorage)
+
+            for share in shares:
+                quota_gib  = share.share_quota or 0          # provisioned size in GiB
+                used_bytes = share.share_usage_bytes or 0    # actual used bytes
+                used_gib   = round(gib(used_bytes), 4) if used_bytes else "N/A"
+                protocols  = str(share.enabled_protocols or "SMB")
+                tier       = str(share.access_tier or "")
+                last_mod   = str(share.last_modified_time.date()) if share.last_modified_time else ""
+
+                # Build UNC / mount path
+                if "NFS" in protocols.upper():
+                    mount_path = f"{acct.name}.file.core.windows.net:/{acct.name}/{share.name}"
+                else:
+                    mount_path = f"{smb_root}\\{share.name}"
+
+                rows.append({
+                    "Subscription":      sub_name,
+                    "Storage Account":   acct.name,
+                    "Share Name":        share.name,
+                    "Resource Group":    rg,
+                    "Location":          location,
+                    "Protocol":          protocols,
+                    "Access Tier":       tier,
+                    "Quota (GiB)":       quota_gib,
+                    "Used (GiB)":        used_gib,
+                    "Storage SKU":       sku,
+                    "Last Modified":     last_mod,
+                    "Mount / UNC Path":  mount_path,
+                })
+
+        if verbose:
+            log.info("File Shares %s: %d shares", sub_name, len(rows))
+    except Exception as exc:
+        log.warning("File Shares %s: %s", sub_name, exc)
+    return rows
+
+
 def collect_netapp(credential, sub_id, sub_name, verbose=False):
     """Collect Azure NetApp Files accounts, pools, and volumes."""
     rows = []
@@ -952,6 +1007,30 @@ def build_sheet_storage(wb, rows):
     return ws
 
 
+def build_sheet_file_shares(wb, rows):
+    ws = _new_sheet(wb, "File Shares")
+    headers = ["Subscription","Storage Account","Share Name","Resource Group","Location",
+               "Protocol","Access Tier","Quota (GiB)","Used (GiB)","Storage SKU",
+               "Last Modified","Mount / UNC Path"]
+    r = _header_row(ws, headers)
+    for i, row in enumerate(rows):
+        vals = [row.get(h, "") for h in headers]
+        for col, v in enumerate(vals, 1):
+            c = ws.cell(row=r, column=col, value=v)
+            c.alignment = LEFT; c.border = BORDER; c.font = NORMAL
+            if i % 2 == 1: c.fill = ALT_FILL
+        # Protocol colouring (col 6) — highlight NFS in yellow (needs different auth)
+        proto = str(row.get("Protocol", "")).upper()
+        ws.cell(row=r, column=6).fill = (YELLOW_FILL if "NFS" in proto else GREEN_FILL)
+        # Used vs Quota — red if used GiB is N/A (no metrics yet)
+        used = row.get("Used (GiB)", "")
+        ws.cell(row=r, column=9).fill = (YELLOW_FILL if used == "N/A" else PatternFill())
+        r += 1
+    _set_col_widths(ws, [18, 26, 22, 20, 14, 10, 14, 10, 10, 18, 14, 42])
+    _freeze(ws)
+    return ws
+
+
 def build_sheet_netapp(wb, rows):
     ws = _new_sheet(wb, "Azure NetApp Files")
     headers = ["Subscription","Account","Pool","Volume","Resource Group","Location",
@@ -1235,6 +1314,7 @@ def build_summary_sheet(wb, data, sub_names):
         ("Disk Snapshots",          snapshots,                    stor_gib_for(snapshots,"Size (GiB)")),
         ("Azure SQL",               sql,                          0),
         ("Storage Accounts",        storage,                      stor_gib),
+        ("Azure File Shares",        data.get("file_shares",[]),   stor_gib_for(data.get("file_shares",[]),"Quota (GiB)")),
         ("Azure NetApp Files",      data.get("netapp",[]),        stor_gib_for(data.get("netapp",[]),"Quota (GiB)")),
         ("Cosmos DB",               data.get("cosmosdb",[]),      0),
         ("Synapse Analytics",       data.get("synapse",[]),       0),
@@ -1343,6 +1423,7 @@ def build_summary_sheet(wb, data, sub_names):
         ("Managed Disks",     stor_gib_for(disks, "Size (GiB)")),
         ("VMs (boot disks)",  vm_gib),
         ("Disk Snapshots",    stor_gib_for(snapshots, "Size (GiB)")),
+        ("Azure File Shares", stor_gib_for(data.get("file_shares",[]), "Quota (GiB)")),
         ("Azure NetApp Files",stor_gib_for(data.get("netapp",[]), "Quota (GiB)")),
     ]
     storage_by_svc.sort(key=lambda x: x[1], reverse=True)
@@ -1376,6 +1457,7 @@ def build_workbook(data, output_path, sub_names):
     build_sheet_snapshots(wb,      data.get("snapshots", []))
     build_sheet_sql(wb,            data.get("sql", []))
     build_sheet_storage(wb,        data.get("storage", []))
+    build_sheet_file_shares(wb,    data.get("file_shares", []))
     build_sheet_netapp(wb,         data.get("netapp", []))
     build_sheet_cosmosdb(wb,       data.get("cosmosdb", []))
     build_sheet_synapse(wb,        data.get("synapse", []))
@@ -1403,6 +1485,7 @@ def collect_subscription(credential, sub_id, sub_name, args):
         ("disks",         lambda: collect_disks(credential, sub_id, sub_name, verbose)),
         ("sql",           lambda: collect_sql(credential, sub_id, sub_name, verbose)),
         ("storage",       lambda: collect_storage(credential, sub_id, sub_name, verbose)),
+        ("file_shares",   lambda: collect_file_shares(credential, sub_id, sub_name, verbose)),
         ("cosmosdb",      lambda: collect_cosmosdb(credential, sub_id, sub_name, verbose)),
         ("aks",           lambda: collect_aks(credential, sub_id, sub_name, verbose)),
         ("aci",           lambda: collect_container_instances(credential, sub_id, sub_name, verbose)),
@@ -1578,6 +1661,7 @@ def main():
         ("Disk Snapshots",        "snapshots"),
         ("Azure SQL",             "sql"),
         ("Storage Accounts",      "storage"),
+        ("Azure File Shares",     "file_shares"),
         ("Azure NetApp Files",    "netapp"),
         ("Cosmos DB",             "cosmosdb"),
         ("Synapse Analytics",     "synapse"),
