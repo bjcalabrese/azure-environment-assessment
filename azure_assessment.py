@@ -502,7 +502,7 @@ def collect_file_shares(credential, sub_id, sub_name, verbose=False):
 
 
 def collect_netapp(credential, sub_id, sub_name, verbose=False):
-    """Collect Azure NetApp Files accounts, pools, and volumes."""
+    """Collect Azure NetApp Files accounts, pools, and volumes with mount paths."""
     rows = []
     if _NetAppClient is None:
         return rows
@@ -518,25 +518,59 @@ def collect_netapp(credential, sub_id, sub_name, verbose=False):
         for acct in accounts:
             rg_a = rg_from_id(acct.id)
             for pool in safe_list(na.pools.list(rg_a, acct.name)):
-                pool_size_gib = (pool.size or 0) // 1_073_741_824
+                pool_size_gib  = (pool.size or 0) // 1_073_741_824
+                svc_level      = str(pool.service_level or "")
+
                 for vol in safe_list(na.volumes.list(rg_a, acct.name, pool.name)):
-                    used_b    = vol.usage_threshold or 0
-                    quota_gib = used_b // 1_073_741_824
-                    svc_level = str(pool.service_level or "")
-                    protocols = ",".join(vol.protocol_types or [])
+                    quota_gib   = (vol.usage_threshold or 0) // 1_073_741_824
+                    used_bytes  = getattr(vol, "actual_throughput_mibps", None)  # not bytes, just check attr exists
+                    # Actual used size comes from volume_usage_bytes if available
+                    used_b      = getattr(vol, "volume_usage_bytes", None) or getattr(vol, "used_bytes", None)
+                    used_gib    = round(gib(used_b), 4) if used_b else "N/A"
+                    protocols   = ",".join(vol.protocol_types or [])
+                    throughput  = getattr(vol, "throughput_mibps", None) or getattr(vol, "actual_throughput_mibps", None)
+                    subnet      = (vol.subnet_id or "").split("/")[-1] if vol.subnet_id else ""
+                    snap_policy = vol.snapshot_policy_id.split("/")[-1] if vol.snapshot_policy_id else "None"
+                    snap_enabled= str(getattr(vol, "snapshot_directory_visible", ""))
+                    vol_path    = getattr(vol, "creation_token", vol.name)  # the volume path / junction path
+
+                    # Mount target IP(s)
+                    mount_ip    = ""
+                    mount_path  = ""
+                    targets     = getattr(vol, "mount_targets", None) or []
+                    if targets:
+                        ips = [t.ip_address for t in targets if getattr(t, "ip_address", None)]
+                        if ips:
+                            mount_ip = ips[0]
+                            if "NFSv" in protocols or "NFS" in protocols.upper():
+                                mount_path = f"{mount_ip}:/{vol_path}"
+                            elif "SMB" in protocols.upper() or "CIFS" in protocols.upper():
+                                smb_fqdn = getattr(targets[0], "smb_server_fqdn", "") or mount_ip
+                                mount_path = f"\\\\{smb_fqdn}\\{vol_path}"
+                            else:
+                                mount_path = f"{mount_ip}:/{vol_path}"
+
                     rows.append({
-                        "Subscription":   sub_name,
-                        "Account":        acct.name,
-                        "Pool":           pool.name,
-                        "Volume":         vol.name,
-                        "Resource Group": rg_a,
-                        "Location":       vol.location or "",
-                        "Service Level":  svc_level,
-                        "Quota (GiB)":    quota_gib,
-                        "Pool Size (GiB)":pool_size_gib,
-                        "Protocols":      protocols,
-                        "Snapshot Policy":vol.snapshot_policy_id.split("/")[-1] if vol.snapshot_policy_id else "None",
+                        "Subscription":    sub_name,
+                        "Account":         acct.name,
+                        "Pool":            pool.name,
+                        "Volume":          vol.name,
+                        "Volume Path":     vol_path,
+                        "Resource Group":  rg_a,
+                        "Location":        vol.location or "",
+                        "Service Level":   svc_level,
+                        "Protocol":        protocols,
+                        "Quota (GiB)":     quota_gib,
+                        "Used (GiB)":      used_gib,
+                        "Pool Size (GiB)": pool_size_gib,
+                        "Throughput (MiB/s)": throughput or "",
+                        "Mount Target IP": mount_ip,
+                        "Mount Path":      mount_path,
+                        "Subnet":          subnet,
+                        "Snapshot Policy": snap_policy,
+                        "Snapshot Dir":    snap_enabled,
                     })
+
         if verbose:
             log.info("NetApp %s: %d volumes", sub_name, len(rows))
     except Exception as exc:
@@ -1033,17 +1067,29 @@ def build_sheet_file_shares(wb, rows):
 
 def build_sheet_netapp(wb, rows):
     ws = _new_sheet(wb, "Azure NetApp Files")
-    headers = ["Subscription","Account","Pool","Volume","Resource Group","Location",
-               "Service Level","Quota (GiB)","Pool Size (GiB)","Protocols","Snapshot Policy"]
+    headers = ["Subscription","Account","Pool","Volume","Volume Path",
+               "Resource Group","Location","Service Level","Protocol",
+               "Quota (GiB)","Used (GiB)","Pool Size (GiB)","Throughput (MiB/s)",
+               "Mount Target IP","Mount Path","Subnet","Snapshot Policy","Snapshot Dir"]
     r = _header_row(ws, headers)
     for i, row in enumerate(rows):
-        vals = [row.get(h,"") for h in headers]
+        vals = [row.get(h, "") for h in headers]
         for col, v in enumerate(vals, 1):
             c = ws.cell(row=r, column=col, value=v)
             c.alignment = LEFT; c.border = BORDER; c.font = NORMAL
             if i % 2 == 1: c.fill = ALT_FILL
+        # Protocol colouring (col 9)
+        proto = str(row.get("Protocol", "")).upper()
+        ws.cell(row=r, column=9).fill = (YELLOW_FILL if "SMB" in proto or "CIFS" in proto
+                                          else GREEN_FILL if "NFS" in proto else PatternFill())
+        # Used GiB (col 11) — yellow if N/A
+        used = row.get("Used (GiB)", "")
+        ws.cell(row=r, column=11).fill = (YELLOW_FILL if used == "N/A" else PatternFill())
+        # Mount path (col 15) — red if empty (no mount target yet)
+        mp = str(row.get("Mount Path", ""))
+        ws.cell(row=r, column=15).fill = (RED_FILL if not mp else PatternFill())
         r += 1
-    _set_col_widths(ws, [18,20,16,20,18,14,14,10,12,16,18])
+    _set_col_widths(ws, [18, 20, 16, 18, 18, 18, 12, 14, 12, 10, 10, 12, 14, 16, 38, 16, 18, 12])
     _freeze(ws)
     return ws
 
