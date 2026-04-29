@@ -178,6 +178,43 @@ def storage_metric(monitor, resource_id, metric_name, namespace):
         pass
     return None
 
+def blob_capacity_by_tier(monitor, resource_id):
+    """Fetch BlobCapacity broken down by storage tier (Hot/Cool/Cold/Archive).
+    Returns dict {tier_name: bytes}.  One API call returns all tiers at once.
+    """
+    result = {}
+    if monitor is None:
+        return result
+    try:
+        end   = datetime.datetime.now(datetime.timezone.utc)
+        start = end - datetime.timedelta(days=2)
+        ts    = f"{start.strftime('%Y-%m-%dT%H:%M:%SZ')}/{end.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+        res   = monitor.metrics.list(
+            resource_id,
+            timespan=ts,
+            interval="PT1H",
+            metricnames="BlobCapacity",
+            aggregation="Average",
+            metricnamespace="microsoft.storage/storageaccounts/blobservices",
+            filter="Tier ne 'Unknown'",        # returns a timeseries per tier
+        )
+        for metric in res.value:
+            for series in metric.timeseries:
+                tier_name = ""
+                for mv in (series.metadatavalues or []):
+                    if mv.name and mv.name.value and mv.name.value.lower() == "tier":
+                        tier_name = (mv.value or "").capitalize()
+                        break
+                if not tier_name:
+                    continue
+                for dp in reversed(series.data):
+                    if dp.average is not None:
+                        result[tier_name] = dp.average
+                        break
+    except Exception:
+        pass
+    return result
+
 # ─── COLLECTORS ───────────────────────────────────────────────────────────────
 
 def collect_vms(credential, sub_id, sub_name, verbose=False):
@@ -268,6 +305,14 @@ def collect_disks(credential, sub_id, sub_name, verbose=False):
             if d.encryption:
                 enc_type = str(d.encryption.type or "")
             tags_     = d.tags or {}
+            # AKS Persistent Volume detection via Kubernetes tags on the disk
+            pvc_name  = tag(tags_, "kubernetes.io-created-for-pvc-name",
+                                    "kubernetes.io/created-for/pvc/name")
+            pvc_ns    = tag(tags_, "kubernetes.io-created-for-pvc-namespace",
+                                    "kubernetes.io/created-for/pvc/namespace")
+            pv_name   = tag(tags_, "kubernetes.io-created-for-pv-name",
+                                    "kubernetes.io/created-for/pv/name")
+            is_pv     = "Yes" if (pvc_name or pv_name) else ""
             rows.append({
                 "Subscription":   sub_name,
                 "Name":           d.name,
@@ -280,6 +325,9 @@ def collect_disks(credential, sub_id, sub_name, verbose=False):
                 "Encryption Type":enc_type,
                 "Disk State":     state,
                 "Attached To":    attached,
+                "AKS PV":         is_pv,
+                "PVC Name":       pvc_name,
+                "PVC Namespace":  pvc_ns,
                 "Environment":    tag(tags_, "Environment", "env"),
             })
         if verbose:
@@ -387,6 +435,43 @@ def collect_sql(credential, sub_id, sub_name, verbose=False):
     return rows
 
 
+def collect_sql_mi_databases(credential, sub_id, sub_name, verbose=False):
+    """Collect individual databases on each SQL Managed Instance."""
+    rows = []
+    if _SqlClient is None:
+        return rows
+    try:
+        sql = _SqlClient(credential, sub_id)
+        for mi in safe_list(sql.managed_instances.list()):
+            rg = rg_from_id(mi.id)
+            vcores   = mi.v_cores or ""
+            storage  = mi.storage_size_in_gb or 0
+            location = mi.location or ""
+            try:
+                dbs = safe_list(sql.managed_databases.list_by_instance(rg, mi.name))
+            except Exception:
+                continue
+            for db in dbs:
+                rows.append({
+                    "Subscription":      sub_name,
+                    "Managed Instance":  mi.name,
+                    "Database Name":     db.name,
+                    "Resource Group":    rg,
+                    "Location":          location,
+                    "Instance vCores":   vcores,
+                    "Instance Storage (GiB)": storage,
+                    "DB Status":         str(db.status or ""),
+                    "Collation":         db.collation or "",
+                    "Created":           str(db.creation_date.date() if db.creation_date else ""),
+                    "Earliest Restore":  str(db.earliest_restore_point.date() if db.earliest_restore_point else ""),
+                })
+        if verbose:
+            log.info("SQL MI Databases %s: %d databases", sub_name, len(rows))
+    except Exception as exc:
+        log.warning("SQL MI Databases %s: %s", sub_name, exc)
+    return rows
+
+
 def collect_storage(credential, sub_id, sub_name, verbose=False):
     """Collect Storage Accounts with blob and file sizes from Azure Monitor."""
     rows = []
@@ -411,15 +496,22 @@ def collect_storage(credential, sub_id, sub_name, verbose=False):
                 enc_key = str(ksp or "")
 
             # Blob & File sizes via Azure Monitor
-            blob_id  = f"{acct.id}/blobServices/default"
-            file_id  = f"{acct.id}/fileServices/default"
-            blob_b   = storage_metric(monitor, blob_id,  "BlobCapacity",  "microsoft.storage/storageaccounts/blobservices")
-            file_b   = storage_metric(monitor, file_id,  "FileCapacity",  "microsoft.storage/storageaccounts/fileservices")
-            blob_gib = round(gib(blob_b), 4) if blob_b is not None else "N/A"
-            file_gib = round(gib(file_b), 4) if file_b is not None else "N/A"
-            total_b  = (blob_b or 0) + (file_b or 0)
-            total_gib= round(gib(total_b), 4) if total_b else "N/A"
-            total_tib= round(tib(total_b), 6) if total_b else "N/A"
+            blob_id   = f"{acct.id}/blobServices/default"
+            file_id   = f"{acct.id}/fileServices/default"
+            blob_b    = storage_metric(monitor, blob_id, "BlobCapacity", "microsoft.storage/storageaccounts/blobservices")
+            file_b    = storage_metric(monitor, file_id, "FileCapacity", "microsoft.storage/storageaccounts/fileservices")
+            blob_gib  = round(gib(blob_b), 4) if blob_b is not None else "N/A"
+            file_gib  = round(gib(file_b), 4) if file_b is not None else "N/A"
+            total_b   = (blob_b or 0) + (file_b or 0)
+            total_gib = round(gib(total_b), 4) if total_b else "N/A"
+            total_tib = round(tib(total_b), 6) if total_b else "N/A"
+
+            # Blob capacity broken down by tier (single Monitor call)
+            tiers     = blob_capacity_by_tier(monitor, blob_id)
+            hot_gib   = round(gib(tiers.get("Hot",  0)), 4) if tiers else "N/A"
+            cool_gib  = round(gib(tiers.get("Cool", 0)), 4) if tiers else "N/A"
+            cold_gib  = round(gib(tiers.get("Cold", 0)), 4) if tiers else "N/A"
+            arch_gib  = round(gib(tiers.get("Archive", 0)), 4) if tiers else "N/A"
 
             tags_ = acct.tags or {}
             rows.append({
@@ -433,6 +525,10 @@ def collect_storage(credential, sub_id, sub_name, verbose=False):
                 "Public Blob Access":str(public_blob) if public_blob is not None else "Unknown",
                 "Encryption Key":    enc_key,
                 "Blob Size (GiB)":   blob_gib,
+                "Blob Hot (GiB)":    hot_gib,
+                "Blob Cool (GiB)":   cool_gib,
+                "Blob Cold (GiB)":   cold_gib,
+                "Blob Archive (GiB)":arch_gib,
                 "File Size (GiB)":   file_gib,
                 "Total Size (GiB)":  total_gib,
                 "Total Size (TiB)":  total_tib,
@@ -954,7 +1050,7 @@ def build_sheet_disks(wb, rows):
     ws = _new_sheet(wb, "Managed Disks")
     headers = ["Subscription","Name","Resource Group","Location","SKU",
                "Size (GiB)","IOPS","Throughput (MB/s)","Encryption Type",
-               "Disk State","Attached To","Environment"]
+               "Disk State","Attached To","AKS PV","PVC Name","PVC Namespace","Environment"]
     r = _header_row(ws, headers)
     for i, row in enumerate(rows):
         vals = [row.get(h,"") for h in headers]
@@ -965,9 +1061,12 @@ def build_sheet_disks(wb, rows):
         # Disk state colouring (col 10)
         state = str(row.get("Disk State","")).lower()
         ws.cell(row=r, column=10).fill = (YELLOW_FILL if "unattached" in state
-                                           else GREEN_FILL if "attached" in state else None or PatternFill())
+                                           else GREEN_FILL if "attached" in state else PatternFill())
+        # AKS PV highlight (col 12) — blue tint so they stand out
+        if row.get("AKS PV") == "Yes":
+            ws.cell(row=r, column=12).fill = PatternFill("solid", fgColor="DEEBF7")
         r += 1
-    _set_col_widths(ws, [18,24,20,14,18,10,8,14,22,14,22,14])
+    _set_col_widths(ws, [18,24,20,14,18,10,8,14,22,14,22,8,22,18,14])
     _freeze(ws)
     return ws
 
@@ -1017,11 +1116,38 @@ def build_sheet_sql(wb, rows):
     return ws
 
 
+def build_sheet_sql_mi_databases(wb, rows):
+    ws = _new_sheet(wb, "SQL MI Databases")
+    headers = ["Subscription","Managed Instance","Database Name","Resource Group",
+               "Location","Instance vCores","Instance Storage (GiB)",
+               "DB Status","Collation","Created","Earliest Restore"]
+    r = _header_row(ws, headers)
+    for i, row in enumerate(rows):
+        vals = [row.get(h,"") for h in headers]
+        for col, v in enumerate(vals, 1):
+            c = ws.cell(row=r, column=col, value=v)
+            c.alignment = LEFT; c.border = BORDER; c.font = NORMAL
+            if i % 2 == 1: c.fill = ALT_FILL
+        # Status colouring (col 8)
+        status = str(row.get("DB Status","")).lower()
+        ws.cell(row=r, column=8).fill = (GREEN_FILL if "online" in status
+                                          else RED_FILL if "offline" in status or "error" in status
+                                          else YELLOW_FILL if status else PatternFill())
+        # Earliest restore — red if empty (no restore point available)
+        er = str(row.get("Earliest Restore",""))
+        ws.cell(row=r, column=11).fill = (RED_FILL if not er else PatternFill())
+        r += 1
+    _set_col_widths(ws, [18,26,24,20,14,14,18,14,20,14,16])
+    _freeze(ws)
+    return ws
+
+
 def build_sheet_storage(wb, rows):
     ws = _new_sheet(wb, "Storage Accounts")
     headers = ["Subscription","Name","Resource Group","Location","SKU","Kind",
                "HTTPS Only","Public Blob Access","Encryption Key",
-               "Blob Size (GiB)","File Size (GiB)","Total Size (GiB)","Total Size (TiB)","Environment"]
+               "Blob Size (GiB)","Blob Hot (GiB)","Blob Cool (GiB)","Blob Cold (GiB)","Blob Archive (GiB)",
+               "File Size (GiB)","Total Size (GiB)","Total Size (TiB)","Environment"]
     r = _header_row(ws, headers)
     for i, row in enumerate(rows):
         vals = [row.get(h,"") for h in headers]
@@ -1035,8 +1161,12 @@ def build_sheet_storage(wb, rows):
         pb = str(row.get("Public Blob Access","")).lower()
         ws.cell(row=r, column=8).fill = (RED_FILL if "true" in pb
                                           else GREEN_FILL if "false" in pb else PatternFill())
+        # Archive tier highlight (col 14) — yellow if any data in archive
+        arch = row.get("Blob Archive (GiB)", 0)
+        if isinstance(arch, float) and arch > 0:
+            ws.cell(row=r, column=14).fill = YELLOW_FILL
         r += 1
-    _set_col_widths(ws, [18,24,20,14,18,14,10,16,24,14,14,14,14,14])
+    _set_col_widths(ws, [18,24,20,14,18,14,10,16,24,12,12,12,12,14,12,14,14,14])
     _freeze(ws)
     return ws
 
@@ -1502,6 +1632,7 @@ def build_workbook(data, output_path, sub_names):
     build_sheet_disks(wb,          data.get("disks", []))
     build_sheet_snapshots(wb,      data.get("snapshots", []))
     build_sheet_sql(wb,            data.get("sql", []))
+    build_sheet_sql_mi_databases(wb, data.get("sql_mi_db", []))
     build_sheet_storage(wb,        data.get("storage", []))
     build_sheet_file_shares(wb,    data.get("file_shares", []))
     build_sheet_netapp(wb,         data.get("netapp", []))
@@ -1530,6 +1661,7 @@ def collect_subscription(credential, sub_id, sub_name, args):
         ("vms",           lambda: collect_vms(credential, sub_id, sub_name, verbose)),
         ("disks",         lambda: collect_disks(credential, sub_id, sub_name, verbose)),
         ("sql",           lambda: collect_sql(credential, sub_id, sub_name, verbose)),
+        ("sql_mi_db",     lambda: collect_sql_mi_databases(credential, sub_id, sub_name, verbose)),
         ("storage",       lambda: collect_storage(credential, sub_id, sub_name, verbose)),
         ("file_shares",   lambda: collect_file_shares(credential, sub_id, sub_name, verbose)),
         ("cosmosdb",      lambda: collect_cosmosdb(credential, sub_id, sub_name, verbose)),
@@ -1706,6 +1838,7 @@ def main():
         ("Managed Disks",         "disks"),
         ("Disk Snapshots",        "snapshots"),
         ("Azure SQL",             "sql"),
+        ("SQL MI Databases",      "sql_mi_db"),
         ("Storage Accounts",      "storage"),
         ("Azure File Shares",     "file_shares"),
         ("Azure NetApp Files",    "netapp"),
