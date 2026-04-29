@@ -487,13 +487,37 @@ def collect_storage(credential, sub_id, sub_name, verbose=False):
             kind        = str(acct.kind or "")
             https_only  = acct.enable_https_traffic_only or False
             public_blob = acct.allow_blob_public_access
-            versioning  = ""
-            soft_delete_days = 0
             enc_key     = ""
 
             if acct.encryption:
                 ksp = acct.encryption.key_source
                 enc_key = str(ksp or "")
+
+            # Determine service type from account kind
+            kind_map = {
+                "FileStorage":       "Azure Files (Premium)",
+                "BlobStorage":       "Blob Storage",
+                "BlockBlobStorage":  "Block Blob (Premium)",
+                "Storage":           "General Purpose v1",
+                "StorageV2":         "General Purpose v2",
+            }
+            svc_type = kind_map.get(kind, kind)
+
+            # Soft delete retention (blob and file)
+            blob_soft_delete = ""
+            file_soft_delete = ""
+            try:
+                bp = storage.blob_services.get_service_properties(rg, acct.name)
+                if bp.delete_retention_policy and bp.delete_retention_policy.enabled:
+                    blob_soft_delete = bp.delete_retention_policy.days or ""
+            except Exception:
+                pass
+            try:
+                fp = storage.file_services.get_service_properties(rg, acct.name)
+                if fp.share_delete_retention_policy and fp.share_delete_retention_policy.enabled:
+                    file_soft_delete = fp.share_delete_retention_policy.days or ""
+            except Exception:
+                pass
 
             # Blob & File sizes via Azure Monitor
             blob_id   = f"{acct.id}/blobServices/default"
@@ -513,26 +537,48 @@ def collect_storage(credential, sub_id, sub_name, verbose=False):
             cold_gib  = round(gib(tiers.get("Cold", 0)), 4) if tiers else "N/A"
             arch_gib  = round(gib(tiers.get("Archive", 0)), 4) if tiers else "N/A"
 
+            # Derive active services from metrics + kind
+            active = []
+            if kind in ("BlobStorage", "BlockBlobStorage") or (isinstance(blob_gib, float) and blob_gib > 0):
+                active.append("Blob")
+            if kind == "FileStorage" or (isinstance(file_gib, float) and file_gib > 0):
+                active.append("Files")
+            if not active:
+                active = ["Unknown"] if (blob_gib == "N/A" and file_gib == "N/A") else ["Blob"]
+            active_services = " + ".join(active)
+
+            # Refine service type label based on actual usage for General Purpose accounts
+            if kind == "StorageV2":
+                if "Files" in active and "Blob" not in active:
+                    svc_type = "Azure Files (GPv2)"
+                elif "Blob" in active and "Files" not in active:
+                    svc_type = "Blob Storage (GPv2)"
+                elif "Blob" in active and "Files" in active:
+                    svc_type = "General Purpose v2 (Blob + Files)"
+
             tags_ = acct.tags or {}
             rows.append({
-                "Subscription":      sub_name,
-                "Name":              acct.name,
-                "Resource Group":    rg,
-                "Location":          acct.location or "",
-                "SKU":               sku,
-                "Kind":              kind,
-                "HTTPS Only":        https_only,
-                "Public Blob Access":str(public_blob) if public_blob is not None else "Unknown",
-                "Encryption Key":    enc_key,
-                "Blob Size (GiB)":   blob_gib,
-                "Blob Hot (GiB)":    hot_gib,
-                "Blob Cool (GiB)":   cool_gib,
-                "Blob Cold (GiB)":   cold_gib,
-                "Blob Archive (GiB)":arch_gib,
-                "File Size (GiB)":   file_gib,
-                "Total Size (GiB)":  total_gib,
-                "Total Size (TiB)":  total_tib,
-                "Environment":       tag(tags_, "Environment", "env"),
+                "Subscription":           sub_name,
+                "Name":                   acct.name,
+                "Resource Group":         rg,
+                "Location":               acct.location or "",
+                "Service Type":           svc_type,
+                "SKU":                    sku,
+                "Active Services":        active_services,
+                "HTTPS Only":             https_only,
+                "Public Blob Access":     str(public_blob) if public_blob is not None else "Unknown",
+                "Encryption Key":         enc_key,
+                "Blob Soft Delete (days)":blob_soft_delete,
+                "File Soft Delete (days)":file_soft_delete,
+                "Blob Size (GiB)":        blob_gib,
+                "Blob Hot (GiB)":         hot_gib,
+                "Blob Cool (GiB)":        cool_gib,
+                "Blob Cold (GiB)":        cold_gib,
+                "Blob Archive (GiB)":     arch_gib,
+                "File Size (GiB)":        file_gib,
+                "Total Size (GiB)":       total_gib,
+                "Total Size (TiB)":       total_tib,
+                "Environment":            tag(tags_, "Environment", "env"),
             })
 
         if verbose:
@@ -1050,7 +1096,8 @@ def build_sheet_disks(wb, rows):
     ws = _new_sheet(wb, "Managed Disks")
     headers = ["Subscription","Name","Resource Group","Location","SKU",
                "Size (GiB)","IOPS","Throughput (MB/s)","Encryption Type",
-               "Disk State","Attached To","AKS PV","PVC Name","PVC Namespace","Environment"]
+               "Disk State","Attached To","Snapshot Coverage",
+               "AKS PV","PVC Name","PVC Namespace","Environment"]
     r = _header_row(ws, headers)
     for i, row in enumerate(rows):
         vals = [row.get(h,"") for h in headers]
@@ -1058,15 +1105,32 @@ def build_sheet_disks(wb, rows):
             c = ws.cell(row=r, column=col, value=v)
             c.alignment = LEFT; c.border = BORDER; c.font = NORMAL
             if i % 2 == 1: c.fill = ALT_FILL
-        # Disk state colouring (col 10)
+        # Disk state (col 10)
         state = str(row.get("Disk State","")).lower()
         ws.cell(row=r, column=10).fill = (YELLOW_FILL if "unattached" in state
                                            else GREEN_FILL if "attached" in state else PatternFill())
-        # AKS PV highlight (col 12) — blue tint so they stand out
+        # Snapshot coverage (col 12)
+        cov = str(row.get("Snapshot Coverage",""))
+        ws.cell(row=r, column=12).fill = (RED_FILL    if "No Snapshot" in cov
+                                           else RED_FILL    if "Stale"      in cov
+                                           else YELLOW_FILL if "Aging"      in cov
+                                           else GREEN_FILL  if cov else PatternFill())
+        # AKS PV (col 13)
         if row.get("AKS PV") == "Yes":
-            ws.cell(row=r, column=12).fill = PatternFill("solid", fgColor="DEEBF7")
+            ws.cell(row=r, column=13).fill = PatternFill("solid", fgColor="DEEBF7")
         r += 1
-    _set_col_widths(ws, [18,24,20,14,18,10,8,14,22,14,22,8,22,18,14])
+
+    # Totals row
+    if rows:
+        ws.cell(row=r, column=1, value="TOTAL").font = BOLD
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=5)
+        total_gib = sum(x.get("Size (GiB)",0) for x in rows if isinstance(x.get("Size (GiB)"),(int,float)))
+        c = ws.cell(row=r, column=6, value=round(total_gib, 2))
+        c.font = Font(bold=True, color="FFFFFF", name="Calibri", size=10)
+        c.fill = HEADER_FILL; c.border = BORDER; c.alignment = CENTER
+        ws.row_dimensions[r].height = 18
+
+    _set_col_widths(ws, [18,24,20,14,18,10,8,14,22,14,22,18,8,22,18,14])
     _freeze(ws)
     return ws
 
@@ -1144,29 +1208,66 @@ def build_sheet_sql_mi_databases(wb, rows):
 
 def build_sheet_storage(wb, rows):
     ws = _new_sheet(wb, "Storage Accounts")
-    headers = ["Subscription","Name","Resource Group","Location","SKU","Kind",
+    headers = ["Subscription","Name","Resource Group","Location",
+               "Service Type","SKU","Active Services",
                "HTTPS Only","Public Blob Access","Encryption Key",
+               "Blob Soft Delete (days)","File Soft Delete (days)",
                "Blob Size (GiB)","Blob Hot (GiB)","Blob Cool (GiB)","Blob Cold (GiB)","Blob Archive (GiB)",
                "File Size (GiB)","Total Size (GiB)","Total Size (TiB)","Environment"]
     r = _header_row(ws, headers)
+
+    # Service Type fill colours
+    svc_fills = {
+        "Azure Files":         PatternFill("solid", fgColor="BDD7EE"),  # blue
+        "Blob Storage":        PatternFill("solid", fgColor="E2EFDA"),  # green
+        "Block Blob":          PatternFill("solid", fgColor="D9E1F2"),  # indigo
+        "General Purpose":     PatternFill("solid", fgColor="EDEDED"),  # grey
+    }
+
+    def svc_fill(svc_type):
+        for key, fill in svc_fills.items():
+            if key.lower() in svc_type.lower():
+                return fill
+        return PatternFill()
+
     for i, row in enumerate(rows):
         vals = [row.get(h,"") for h in headers]
         for col, v in enumerate(vals, 1):
             c = ws.cell(row=r, column=col, value=v)
             c.alignment = LEFT; c.border = BORDER; c.font = NORMAL
             if i % 2 == 1: c.fill = ALT_FILL
-        # HTTPS Only (col 7)
-        ws.cell(row=r, column=7).fill = (GREEN_FILL if row.get("HTTPS Only") else RED_FILL)
-        # Public Blob (col 8)
+        # Service Type badge (col 5)
+        ws.cell(row=r, column=5).fill = svc_fill(str(row.get("Service Type","")))
+        ws.cell(row=r, column=5).font = Font(bold=True, name="Calibri", size=10)
+        # HTTPS Only (col 8)
+        ws.cell(row=r, column=8).fill = (GREEN_FILL if row.get("HTTPS Only") else RED_FILL)
+        # Public Blob (col 9)
         pb = str(row.get("Public Blob Access","")).lower()
-        ws.cell(row=r, column=8).fill = (RED_FILL if "true" in pb
+        ws.cell(row=r, column=9).fill = (RED_FILL if "true" in pb
                                           else GREEN_FILL if "false" in pb else PatternFill())
-        # Archive tier highlight (col 14) — yellow if any data in archive
+        # Soft delete — red if empty (no protection)
+        ws.cell(row=r, column=11).fill = (RED_FILL if row.get("Blob Soft Delete (days)") == "" else GREEN_FILL)
+        ws.cell(row=r, column=12).fill = (RED_FILL if row.get("File Soft Delete (days)") == "" else GREEN_FILL)
+        # Archive tier (col 17) — yellow if data exists in archive
         arch = row.get("Blob Archive (GiB)", 0)
         if isinstance(arch, float) and arch > 0:
-            ws.cell(row=r, column=14).fill = YELLOW_FILL
+            ws.cell(row=r, column=17).fill = YELLOW_FILL
         r += 1
-    _set_col_widths(ws, [18,24,20,14,18,14,10,16,24,12,12,12,12,14,12,14,14,14])
+
+    # Totals row
+    if rows:
+        ws.cell(row=r, column=1, value="TOTAL").font = BOLD
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=4)
+        for col, key in [(13,"Blob Size (GiB)"), (18,"File Size (GiB)"),
+                         (19,"Total Size (GiB)"), (20,"Total Size (TiB)")]:
+            total = sum(x.get(key,0) for x in rows if isinstance(x.get(key),(int,float)))
+            c = ws.cell(row=r, column=col, value=round(total,4))
+            c.font = BOLD; c.fill = HEADER_FILL
+            c.font = Font(bold=True, color="FFFFFF", name="Calibri", size=10)
+            c.border = BORDER; c.alignment = CENTER
+        ws.row_dimensions[r].height = 18
+
+    _set_col_widths(ws, [18,24,20,14,26,18,18,10,16,24,20,20,12,12,12,12,14,12,14,14,14])
     _freeze(ws)
     return ws
 
@@ -1523,13 +1624,22 @@ def build_summary_sheet(wb, data, sub_names):
     non_ssl_redis   = sum(1 for r_ in data.get("redis",[]) if r_.get("Non-SSL Port"))
     vms_no_backup   = max(0, len(vms) - sum(v.get("Protected Items",0) for v in vaults))
 
+    no_blob_soft_delete  = sum(1 for s in storage if s.get("Blob Soft Delete (days)") == ""
+                               and s.get("Active Services","") not in ("","Unknown")
+                               and "Files" not in s.get("Service Type",""))
+    no_file_soft_delete  = sum(1 for s in storage if s.get("File Soft Delete (days)") == ""
+                               and ("Files" in s.get("Active Services","") or
+                                    "Files" in s.get("Service Type","")))
+
     findings = [
-        ("CRITICAL", "Public Blob Access Enabled",         public_storage),
-        ("CRITICAL", "SQL with Public Network Access",     public_sql),
-        ("HIGH",     "Storage Without HTTPS-Only",         http_storage),
-        ("HIGH",     "Unattached Managed Disks",           unattached_disks),
-        ("HIGH",     "Redis with Non-SSL Port Enabled",    non_ssl_redis),
-        ("MEDIUM",   "VMs Without Backup Coverage",        vms_no_backup),
+        ("CRITICAL", "Public Blob Access Enabled",          public_storage),
+        ("CRITICAL", "SQL with Public Network Access",      public_sql),
+        ("HIGH",     "Storage Without HTTPS-Only",          http_storage),
+        ("HIGH",     "Unattached Managed Disks",            unattached_disks),
+        ("HIGH",     "Redis with Non-SSL Port Enabled",     non_ssl_redis),
+        ("HIGH",     "Blob Storage: No Soft Delete",        no_blob_soft_delete),
+        ("HIGH",     "Azure Files: No Soft Delete",         no_file_soft_delete),
+        ("MEDIUM",   "VMs Without Backup Coverage",         vms_no_backup),
     ]
 
     r2 = 8
@@ -1613,6 +1723,82 @@ def build_summary_sheet(wb, data, sub_names):
         ws.row_dimensions[r2].height = 15
         r2 += 1
 
+    # ── Backup Sizing Summary (left column, below workload inventory) ──────────
+    r += 1
+    r = section_header(r, 1, 4, "Backup Sizing Summary", fill=PatternFill("solid", fgColor="375623"))
+    r = mini_header(r, ["Service", "Total (GiB)", "Total (TiB)", "Suggested Method"], 1)
+
+    blob_gib_total = stor_gib_for(storage, "Blob Size (GiB)")
+    file_gib_total = stor_gib_for(storage, "File Size (GiB)")
+    disk_gib_total = stor_gib_for(disks, "Size (GiB)")
+    anf_gib_total  = stor_gib_for(data.get("netapp",[]), "Quota (GiB)")
+    fs_gib_total   = stor_gib_for(data.get("file_shares",[]), "Quota (GiB)")
+
+    sizing = [
+        ("Managed Disks",      disk_gib_total,  "Azure Backup for Disks / Snapshots"),
+        ("Blob Storage",       blob_gib_total,  "Azure Backup for Blobs / Versioning"),
+        ("Azure Files",        file_gib_total + fs_gib_total, "Azure Backup for Files / File Sync"),
+        ("Azure NetApp Files", anf_gib_total,   "ANF Snapshots / CRR"),
+        ("Azure SQL",          0,               "Azure Backup for SQL / Auto-backup"),
+    ]
+    grand_gib = sum(g for _, g, _ in sizing)
+
+    for i, (svc, sg, method) in enumerate(sizing):
+        alt  = i % 2 == 0
+        fill = ALT_FILL if alt else None
+        cells = [svc, round(sg,2), _tib(sg), method]
+        for col_off, val in enumerate(cells):
+            c = ws.cell(row=r, column=1+col_off, value=val)
+            c.font = NORMAL; c.alignment = LEFT; c.border = BORDER
+            if fill: c.fill = fill
+        ws.row_dimensions[r].height = 15
+        r += 1
+
+    # Grand total row
+    ws.cell(row=r, column=1, value="TOTAL PROTECTABLE").font = BOLD
+    ws.cell(row=r, column=2, value=round(grand_gib,2)).font = BOLD
+    ws.cell(row=r, column=3, value=_tib(grand_gib)).font = BOLD
+    ws.cell(row=r, column=4, value="").font = BOLD
+    for col in range(1,5):
+        ws.cell(row=r, column=col).fill = HEADER_FILL
+        ws.cell(row=r, column=col).font = Font(bold=True, color="FFFFFF", name="Calibri", size=10)
+        ws.cell(row=r, column=col).border = BORDER
+        ws.cell(row=r, column=col).alignment = LEFT
+    ws.row_dimensions[r].height = 18
+    r += 1
+
+    # ── Snapshot Coverage Summary (left column) ───────────────────────────────
+    r += 1
+    r = section_header(r, 1, 4, "Disk Snapshot Coverage")
+    snap_no      = sum(1 for d in disks if "No Snapshot" in str(d.get("Snapshot Coverage","")))
+    snap_stale   = sum(1 for d in disks if "Stale"       in str(d.get("Snapshot Coverage","")))
+    snap_aging   = sum(1 for d in disks if "Aging"       in str(d.get("Snapshot Coverage","")))
+    snap_current = sum(1 for d in disks if "Current" in str(d.get("Snapshot Coverage","")) or
+                                           "Recent"  in str(d.get("Snapshot Coverage","")))
+    snap_rows = [
+        ("No Snapshot",       snap_no,      RED_FILL),
+        ("Stale (>30 days)",  snap_stale,   RED_FILL),
+        ("Aging (8–30 days)", snap_aging,   YELLOW_FILL),
+        ("Current (≤7 days)", snap_current, GREEN_FILL),
+    ]
+    for label, cnt, cfill in snap_rows:
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=3)
+        ws.cell(row=r, column=1, value=label).font = NORMAL
+        ws.cell(row=r, column=1).border = BORDER
+        ws.cell(row=r, column=1).alignment = LEFT
+        c = ws.cell(row=r, column=4, value=cnt)
+        c.font = BOLD; c.fill = cfill; c.border = BORDER; c.alignment = CENTER
+        ws.row_dimensions[r].height = 15
+        r += 1
+
+    # Add snapshot warning to findings if significant
+    snap_unprotected_gib = sum(
+        d.get("Size (GiB)",0) for d in disks
+        if isinstance(d.get("Size (GiB)"),(int,float)) and
+        ("No Snapshot" in str(d.get("Snapshot Coverage","")) or
+         "Stale"       in str(d.get("Snapshot Coverage","")))
+    )
+
     # Column widths for summary
     col_w = [20, 14, 14, 14, 16, 32, 8, 14]
     for col, w in enumerate(col_w, 1):
@@ -1623,9 +1809,38 @@ def build_summary_sheet(wb, data, sub_names):
 
 # ─── WORKBOOK ─────────────────────────────────────────────────────────────────
 
+def _add_snapshot_coverage(data):
+    """Cross-reference disks with snapshots; stamp each disk with coverage status."""
+    snap_ages = defaultdict(list)
+    for snap in data.get("snapshots", []):
+        src  = snap.get("Source Disk", "")
+        age  = snap.get("Age (days)", "")
+        if src and isinstance(age, int):
+            snap_ages[src].append(age)
+
+    for disk in data.get("disks", []):
+        name = disk.get("Name", "")
+        ages = snap_ages.get(name, [])
+        if not ages:
+            disk["Snapshot Coverage"] = "No Snapshot"
+        else:
+            newest = min(ages)
+            if newest <= 1:
+                disk["Snapshot Coverage"] = f"Current ({newest}d)"
+            elif newest <= 7:
+                disk["Snapshot Coverage"] = f"Recent ({newest}d)"
+            elif newest <= 30:
+                disk["Snapshot Coverage"] = f"Aging ({newest}d)"
+            else:
+                disk["Snapshot Coverage"] = f"Stale ({newest}d)"
+
+
 def build_workbook(data, output_path, sub_names):
     wb = openpyxl.Workbook()
     wb.remove(wb.active)  # remove default sheet
+
+    # Post-processing: stamp snapshot coverage onto each disk
+    _add_snapshot_coverage(data)
 
     build_summary_sheet(wb, data, sub_names)
     build_sheet_vms(wb,            data.get("vms", []))
