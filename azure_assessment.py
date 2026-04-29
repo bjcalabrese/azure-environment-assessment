@@ -537,23 +537,34 @@ def collect_storage(credential, sub_id, sub_name, verbose=False):
             cold_gib  = round(gib(tiers.get("Cold", 0)), 4) if tiers else "N/A"
             arch_gib  = round(gib(tiers.get("Archive", 0)), 4) if tiers else "N/A"
 
-            # Derive active services from metrics + kind
-            active = []
-            if kind in ("BlobStorage", "BlockBlobStorage") or (isinstance(blob_gib, float) and blob_gib > 0):
-                active.append("Blob")
-            if kind == "FileStorage" or (isinstance(file_gib, float) and file_gib > 0):
-                active.append("Files")
-            if not active:
-                active = ["Unknown"] if (blob_gib == "N/A" and file_gib == "N/A") else ["Blob"]
-            active_services = " + ".join(active)
+            # Derive active services — use kind as primary truth, metrics to refine
+            has_blob = isinstance(blob_gib, float) and blob_gib > 0
+            has_file = isinstance(file_gib, float) and file_gib > 0
 
-            # Refine service type label based on actual usage for General Purpose accounts
+            if kind in ("BlobStorage", "BlockBlobStorage"):
+                active_services = "Blob"
+            elif kind == "FileStorage":
+                active_services = "Files"
+            elif kind in ("StorageV2", "Storage"):
+                # Use metrics if available to be specific, otherwise say both are possible
+                if has_blob and has_file:
+                    active_services = "Blob + Files"
+                elif has_blob:
+                    active_services = "Blob"
+                elif has_file:
+                    active_services = "Files"
+                else:
+                    active_services = "Blob / Files"   # GPv2 supports both; metrics not yet available
+            else:
+                active_services = "Blob / Files"
+
+            # Refine service type label for General Purpose accounts where we know usage
             if kind == "StorageV2":
-                if "Files" in active and "Blob" not in active:
+                if active_services == "Files":
                     svc_type = "Azure Files (GPv2)"
-                elif "Blob" in active and "Files" not in active:
+                elif active_services == "Blob":
                     svc_type = "Blob Storage (GPv2)"
-                elif "Blob" in active and "Files" in active:
+                elif active_services == "Blob + Files":
                     svc_type = "General Purpose v2 (Blob + Files)"
 
             tags_ = acct.tags or {}
