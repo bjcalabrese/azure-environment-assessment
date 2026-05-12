@@ -1429,7 +1429,10 @@ def collect_cloud_spend(credential, sub_id, sub_name, verbose=False):
         prev_end   = cur_start - datetime.timedelta(days=1)
         prev_start = prev_end.replace(day=1)
 
-        def _query_spend(start, end):
+        def _query_spend(start, end, include_family=True):
+            grouping = [models.QueryGrouping(type="Dimension", name="ServiceName")]
+            if include_family:
+                grouping.append(models.QueryGrouping(type="Dimension", name="ServiceFamily"))
             params = models.QueryDefinition(
                 type="ActualCost",
                 timeframe="Custom",
@@ -1437,29 +1440,31 @@ def collect_cloud_spend(credential, sub_id, sub_name, verbose=False):
                 dataset=models.QueryDataset(
                     granularity="None",
                     aggregation={"totalCost": models.QueryAggregation(name="Cost", function="Sum")},
-                    grouping=[
-                        models.QueryGrouping(type="Dimension", name="ServiceName"),
-                        models.QueryGrouping(type="Dimension", name="ServiceFamily"),
-                    ],
+                    grouping=grouping,
                 ),
             )
             result = client.query.usage(scope, params)
             col_idx  = {c.name.lower(): i for i, c in enumerate(result.columns or [])}
             cost_i   = col_idx.get("cost", col_idx.get("pretaxcost", 0))
             svc_i    = col_idx.get("servicename", 1)
-            fam_i    = col_idx.get("servicefamily", 2)
+            fam_i    = col_idx.get("servicefamily", 2) if include_family else None
             cur_i    = col_idx.get("currency", None)
             out = {}
             for row in (result.rows or []):
                 svc      = str(row[svc_i])  if svc_i  < len(row) else "Other"
-                fam      = str(row[fam_i])  if fam_i  < len(row) else ""
+                fam      = (str(row[fam_i]) if fam_i is not None and fam_i < len(row) else "")
                 cost     = float(row[cost_i]) if cost_i < len(row) else 0.0
                 currency = str(row[cur_i])  if cur_i is not None and cur_i < len(row) else "USD"
                 out[svc] = (round(cost, 4), fam, currency)
             return out
 
-        cur_spend  = _query_spend(cur_start, cur_end)
-        prev_spend = _query_spend(prev_start, prev_end)
+        # Some subscription types (e.g. Visual Studio/MSDN) don't support ServiceFamily
+        try:
+            cur_spend  = _query_spend(cur_start, cur_end,   include_family=True)
+            prev_spend = _query_spend(prev_start, prev_end, include_family=True)
+        except Exception:
+            cur_spend  = _query_spend(cur_start, cur_end,   include_family=False)
+            prev_spend = _query_spend(prev_start, prev_end, include_family=False)
 
         all_services = sorted(set(cur_spend) | set(prev_spend))
         cur_label  = cur_start.strftime("%b %Y")
