@@ -63,6 +63,7 @@ _SynapseClient        = _try_import("azure.mgmt.synapse",               "Synapse
 _ACIClient            = _try_import("azure.mgmt.containerinstance",     "ContainerInstanceManagementClient")
 _MonitorClient        = _try_import("azure.mgmt.monitor",               "MonitorManagementClient")
 _SqlVMClient          = _try_import("azure.mgmt.sqlvirtualmachine",     "SqlVirtualMachineManagementClient")
+_CostClient           = _try_import("azure.mgmt.costmanagement",        "CostManagementClient")
 
 # Critical imports — fail if missing
 for _name, _obj in [("azure-mgmt-resource", _SubscriptionClient),
@@ -1251,6 +1252,145 @@ def collect_backup(credential, sub_id, sub_name, verbose=False):
     return vault_rows, plan_rows
 
 
+def collect_backup_costs(credential, sub_id, sub_name, verbose=False):
+    """Collect Azure Cost Management data for Recovery Services Vaults (last 30 days)."""
+    rows = []
+    if _CostClient is None:
+        return rows
+    try:
+        import importlib
+        models = importlib.import_module("azure.mgmt.costmanagement.models")
+        client = _CostClient(credential)
+        scope  = f"/subscriptions/{sub_id}"
+
+        end_dt   = datetime.datetime.now(datetime.timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        start_dt = end_dt - datetime.timedelta(days=30)
+
+        params = models.QueryDefinition(
+            type="ActualCost",
+            timeframe="Custom",
+            time_period=models.QueryTimePeriod(
+                from_property=start_dt,
+                to=end_dt,
+            ),
+            dataset=models.QueryDataset(
+                granularity="None",
+                aggregation={"totalCost": models.QueryAggregation(name="Cost", function="Sum")},
+                grouping=[
+                    models.QueryGrouping(type="Dimension", name="ResourceId"),
+                    models.QueryGrouping(type="Dimension", name="ResourceGroupName"),
+                    models.QueryGrouping(type="Dimension", name="ResourceLocation"),
+                ],
+                filter=models.QueryFilter(
+                    dimensions=models.QueryComparisonExpression(
+                        name="ResourceType",
+                        operator="In",
+                        values=["microsoft.recoveryservices/vaults"],
+                    )
+                ),
+            ),
+        )
+
+        result = client.query.usage(scope, params)
+
+        # Map column names to indices
+        col_idx = {c.name.lower(): i for i, c in enumerate(result.columns or [])}
+        cost_i  = col_idx.get("cost", col_idx.get("pretaxcost", 0))
+        rid_i   = col_idx.get("resourceid", 1)
+        rg_i    = col_idx.get("resourcegroupname", 2)
+        loc_i   = col_idx.get("resourcelocation", 3)
+        cur_i   = col_idx.get("currency", None)
+
+        period = f"{start_dt.strftime('%Y-%m-%d')} – {end_dt.strftime('%Y-%m-%d')}"
+        for row in (result.rows or []):
+            rid       = str(row[rid_i]) if rid_i < len(row) else ""
+            vault_name= rid.split("/")[-1] if rid else ""
+            rg        = str(row[rg_i])  if rg_i  < len(row) else ""
+            loc       = str(row[loc_i]) if loc_i < len(row) else ""
+            cost      = row[cost_i] if cost_i < len(row) else 0
+            currency  = str(row[cur_i]) if cur_i is not None and cur_i < len(row) else "USD"
+            rows.append({
+                "Subscription":   sub_name,
+                "Vault Name":     vault_name,
+                "Resource Group": rg,
+                "Location":       loc,
+                "Cost (30 days)": round(float(cost), 4),
+                "Currency":       currency,
+                "Period":         period,
+            })
+
+        if verbose:
+            log.info("Backup costs %s: %d vaults", sub_name, len(rows))
+    except Exception as exc:
+        log.warning("Backup costs %s: %s", sub_name, exc)
+    return rows
+
+
+# ─── ANONYMIZER ───────────────────────────────────────────────────────────────
+
+import csv as _csv
+
+# Fields to anonymize and the category prefix to use
+_ANON_FIELDS = {
+    "Subscription":      ("sub",   "SUB"),
+    "Resource Group":    ("rg",    "RG"),
+    "Name":              ("res",   "RES"),
+    "VM Name":           ("vm",    "VM"),
+    "Cluster Name":      ("vm",    "VM"),
+    "Server / Instance": ("sql",   "SQL"),
+    "Server":            ("sql",   "SQL"),
+    "Managed Instance":  ("sql",   "SQL"),
+    "Database Name":     ("sqldb", "SQLDB"),
+    "Pool Name":         ("pool",  "POOL"),
+    "Workspace":         ("syn",   "SYN"),
+    "Host Pool":         ("avd",   "AVD"),
+    "Vault Name":        ("vault", "VAULT"),
+    "Vault":             ("vault", "VAULT"),
+    "Storage Account":   ("sa",    "SA"),
+    "Share Name":        ("res",   "RES"),
+    "Protected Item":    ("res",   "RES"),
+    "SQL Pool":          ("pool",  "POOL"),
+}
+
+
+class Anonymizer:
+    """Replace real Azure resource names with opaque codes; export a reversible mapping CSV."""
+
+    def __init__(self):
+        self._maps     = defaultdict(dict)
+        self._counters = defaultdict(int)
+
+    def map(self, category, prefix, value):
+        if not value or not str(value).strip():
+            return value
+        key = str(value)
+        if key not in self._maps[category]:
+            self._counters[category] += 1
+            self._maps[category][key] = f"{prefix}-{self._counters[category]:04d}"
+        return self._maps[category][key]
+
+    def apply(self, rows):
+        """Return a copy of rows with identifying fields replaced by codes."""
+        out = []
+        for row in rows:
+            r = dict(row)
+            for field, (cat, prefix) in _ANON_FIELDS.items():
+                if field in r:
+                    r[field] = self.map(cat, prefix, r[field])
+            out.append(r)
+        return out
+
+    def save(self, path):
+        """Write the reversible mapping to a CSV file."""
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = _csv.writer(f)
+            w.writerow(["Category", "Code", "Original Value"])
+            for cat, mapping in sorted(self._maps.items()):
+                for real, code in sorted(mapping.items(), key=lambda x: x[1]):
+                    w.writerow([cat, code, real])
+        log.info("Anonymization mapping saved: %s", path)
+
+
 # ─── SHEET BUILDERS ───────────────────────────────────────────────────────────
 
 def _new_sheet(wb, title):
@@ -1729,6 +1869,33 @@ def build_sheet_backup_items(wb, rows):
     return ws
 
 
+def build_sheet_backup_costs(wb, rows):
+    ws = _new_sheet(wb, "Backup Costs")
+    headers = ["Subscription","Vault Name","Resource Group","Location",
+               "Cost (30 days)","Currency","Period"]
+    r = _header_row(ws, headers)
+    for i, row in enumerate(rows):
+        vals = [row.get(h,"") for h in headers]
+        for col, v in enumerate(vals, 1):
+            c = ws.cell(row=r, column=col, value=v)
+            c.alignment = LEFT; c.border = BORDER; c.font = NORMAL
+            if i % 2 == 1: c.fill = ALT_FILL
+        r += 1
+    # Totals row
+    if rows:
+        ws.cell(row=r, column=1, value="TOTAL").font = BOLD
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=4)
+        total = sum(x.get("Cost (30 days)", 0) for x in rows if isinstance(x.get("Cost (30 days)"), (int, float)))
+        currency = rows[0].get("Currency", "USD") if rows else "USD"
+        c = ws.cell(row=r, column=5, value=round(total, 2))
+        c.font = Font(bold=True, color="FFFFFF", name="Calibri", size=10)
+        c.fill = HEADER_FILL; c.border = BORDER; c.alignment = CENTER
+        ws.cell(row=r, column=6, value=currency).font = BOLD
+    _set_col_widths(ws, [18,26,20,14,16,10,28])
+    _freeze(ws)
+    return ws
+
+
 def build_sheet_elastic_pools(wb, rows):
     ws = _new_sheet(wb, "SQL Elastic Pools")
     headers = ["Subscription","Server","Pool Name","Resource Group","Location",
@@ -2132,12 +2299,16 @@ def _add_snapshot_coverage(data):
                 disk["Snapshot Coverage"] = f"Stale ({newest}d)"
 
 
-def build_workbook(data, output_path, sub_names):
+def build_workbook(data, output_path, sub_names, anonymizer=None):
     wb = openpyxl.Workbook()
     wb.remove(wb.active)  # remove default sheet
 
     # Post-processing: stamp snapshot coverage onto each disk
     _add_snapshot_coverage(data)
+
+    # Apply anonymization to all collected rows before writing
+    if anonymizer:
+        data = {k: anonymizer.apply(v) for k, v in data.items()}
 
     build_summary_sheet(wb, data, sub_names)
     build_sheet_vms(wb,            data.get("vms", []))
@@ -2159,6 +2330,7 @@ def build_workbook(data, output_path, sub_names):
     build_sheet_redis(wb,          data.get("redis", []))
     build_sheet_backup_vaults(wb,  data.get("backup_vaults", []))
     build_sheet_backup_items(wb,   data.get("backup_items", []))
+    build_sheet_backup_costs(wb,   data.get("backup_costs", []))
 
     wb.save(output_path)
     log.info("Saved: %s", output_path)
@@ -2208,6 +2380,9 @@ def collect_subscription(credential, sub_id, sub_name, args):
     vault_rows, item_rows = collect_backup(credential, sub_id, sub_name, verbose)
     results["backup_vaults"] = vault_rows
     results["backup_items"]  = item_rows
+
+    # Backup costs via Cost Management
+    results["backup_costs"] = collect_backup_costs(credential, sub_id, sub_name, verbose)
 
     # Cross-reference: stamp SQL Server flag and backup policy onto each VM row
     if sql_vm_names or item_rows:
@@ -2270,6 +2445,10 @@ def parse_args():
     p.add_argument(
         "--verbose", action="store_true",
         help="Enable detailed per-service logging",
+    )
+    p.add_argument(
+        "--anonymize", action="store_true",
+        help="Replace resource names with opaque codes; saves a reversible mapping CSV alongside the workbook",
     )
     return p.parse_args()
 
@@ -2369,7 +2548,13 @@ def main():
 
     # Build workbook
     print(f"\nBuilding workbook: {output}")
-    build_workbook(dict(all_data), output, sub_names)
+    anonymizer = Anonymizer() if args.anonymize else None
+    build_workbook(dict(all_data), output, sub_names, anonymizer=anonymizer)
+
+    if anonymizer:
+        mapping_path = output.replace(".xlsx", "_mapping.csv")
+        anonymizer.save(mapping_path)
+        print(f"Anonymization mapping : {mapping_path}  (keep this file private)")
 
     # Print summary
     print("\n── Results ───────────────────────────────────────")
