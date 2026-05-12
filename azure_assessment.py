@@ -62,6 +62,7 @@ _AVDClient            = _try_import("azure.mgmt.desktopvirtualization", "Desktop
 _SynapseClient        = _try_import("azure.mgmt.synapse",               "SynapseManagementClient")
 _ACIClient            = _try_import("azure.mgmt.containerinstance",     "ContainerInstanceManagementClient")
 _MonitorClient        = _try_import("azure.mgmt.monitor",               "MonitorManagementClient")
+_SqlVMClient          = _try_import("azure.mgmt.sqlvirtualmachine",     "SqlVirtualMachineManagementClient")
 
 # Critical imports — fail if missing
 for _name, _obj in [("azure-mgmt-resource", _SubscriptionClient),
@@ -276,6 +277,9 @@ def collect_vms(credential, sub_id, sub_name, verbose=False):
                 "Environment":        tag(tags_, "Environment", "env", "Env"),
                 "Owner":              tag(tags_, "Owner", "owner"),
                 "Backup Tag":         tag(tags_, "Backup", "backup", "BackupPolicy"),
+                "MSSQL-INSTALLED":    "",   # filled in post-collection
+                "Backup Policy":      "",   # filled in post-collection
+                "Backup Protected":   "",   # filled in post-collection
             })
         if verbose:
             log.info("VMs %s: %d found", sub_name, len(rows))
@@ -377,7 +381,54 @@ def collect_sql(credential, sub_id, sub_name, verbose=False):
     if _SqlClient is None:
         return rows
     try:
-        sql = _SqlClient(credential, sub_id)
+        sql     = _SqlClient(credential, sub_id)
+        monitor = _MonitorClient(credential, sub_id) if _MonitorClient else None
+
+        def _sql_metrics(resource_id):
+            """Return (allocated_gib, used_gib) from Monitor; None if unavailable."""
+            if not monitor:
+                return None, None
+            try:
+                end   = datetime.datetime.now(datetime.timezone.utc)
+                start = end - datetime.timedelta(days=1)
+                ts    = f"{start.strftime('%Y-%m-%dT%H:%M:%SZ')}/{end.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+                res   = monitor.metrics.list(
+                    resource_id, timespan=ts, interval="PT1H",
+                    metricnames="allocated_data_storage,storage",
+                    aggregation="Maximum",
+                    metricnamespace="microsoft.sql/servers/databases",
+                )
+                alloc = used = None
+                for m in res.value:
+                    for series in m.timeseries:
+                        for dp in reversed(series.data):
+                            if dp.maximum is not None:
+                                val = round(dp.maximum / 1_073_741_824, 4)
+                                if "allocated" in m.name.value.lower():
+                                    alloc = val
+                                else:
+                                    used = val
+                                break
+                return alloc, used
+            except Exception:
+                return None, None
+
+        def _sql_retention(rg, server, db_name):
+            """Return (pitr_days, ltr_weekly, ltr_monthly, ltr_yearly)."""
+            pitr = ltr_w = ltr_m = ltr_y = ""
+            try:
+                p = sql.backup_short_term_retention_policies.get(rg, server, db_name)
+                pitr = p.retention_days or ""
+            except Exception:
+                pass
+            try:
+                p = sql.backup_long_term_retention_policies.get(rg, server, db_name)
+                ltr_w = p.weekly_retention  or ""
+                ltr_m = p.monthly_retention or ""
+                ltr_y = p.yearly_retention  or ""
+            except Exception:
+                pass
+            return pitr, ltr_w, ltr_m, ltr_y
 
         # PaaS databases
         for srv in safe_list(sql.servers.list()):
@@ -385,26 +436,36 @@ def collect_sql(credential, sub_id, sub_name, verbose=False):
             for db in safe_list(sql.databases.list_by_server(rg_s, srv.name)):
                 if db.name == "master":
                     continue
-                sku_name = db.sku.name if db.sku else ""
-                tier     = db.sku.tier if db.sku else ""
-                cap      = db.sku.capacity if db.sku else ""
-                storage  = (db.max_size_bytes or 0) / 1_073_741_824
-                retention= db.backup_storage_redundancy or ""
+                sku_name   = db.sku.name if db.sku else ""
+                tier       = db.sku.tier if db.sku else ""
+                cap        = db.sku.capacity if db.sku else ""
+                storage    = (db.max_size_bytes or 0) / 1_073_741_824
+                retention  = getattr(db, "requested_backup_storage_redundancy", None) or getattr(db, "backup_storage_redundancy", None) or ""
+                pool_name  = getattr(db, "elastic_pool_name", None) or ""
+                alloc, used = _sql_metrics(db.id)
+                pitr, ltr_w, ltr_m, ltr_y = _sql_retention(rg_s, srv.name, db.name)
                 rows.append({
-                    "Subscription":     sub_name,
-                    "Type":             "Azure SQL Database",
-                    "Server / Instance":srv.name,
-                    "Database Name":    db.name,
-                    "Resource Group":   rg_s,
-                    "Location":         db.location or "",
-                    "SKU":              sku_name,
-                    "Tier":             tier,
-                    "Capacity":         str(cap),
-                    "Max Storage (GiB)":round(storage, 2),
-                    "Backup Redundancy":str(retention),
-                    "Public Access":    str(srv.public_network_access or ""),
-                    "Encryption (TDE)": "Enabled",  # TDE on by default in Azure SQL
-                    "Availability Zone":db.availability_zone or "",
+                    "Subscription":      sub_name,
+                    "Type":              "Azure SQL Database",
+                    "Server / Instance": srv.name,
+                    "Database Name":     db.name,
+                    "Resource Group":    rg_s,
+                    "Location":          db.location or "",
+                    "SKU":               sku_name,
+                    "Tier":              tier,
+                    "Capacity":          str(cap),
+                    "Max Storage (GiB)": round(storage, 2),
+                    "Allocated (GiB)":   alloc,
+                    "Used (GiB)":        used,
+                    "Elastic Pool":      pool_name,
+                    "PITR (Days)":       pitr,
+                    "LTR Weekly":        ltr_w,
+                    "LTR Monthly":       ltr_m,
+                    "LTR Yearly":        ltr_y,
+                    "Backup Redundancy": str(retention),
+                    "Public Access":     str(srv.public_network_access or ""),
+                    "Encryption (TDE)":  "Enabled",
+                    "Availability Zone": getattr(db, "availability_zone", None) or "",
                 })
 
         # Managed Instances
@@ -470,6 +531,110 @@ def collect_sql_mi_databases(credential, sub_id, sub_name, verbose=False):
     except Exception as exc:
         log.warning("SQL MI Databases %s: %s", sub_name, exc)
     return rows
+
+
+def collect_sql_elastic_pools(credential, sub_id, sub_name, verbose=False):
+    """Collect SQL Elastic Pools with pool-level sizing and per-database assignments."""
+    rows = []
+    if _SqlClient is None:
+        return rows
+    try:
+        sql     = _SqlClient(credential, sub_id)
+        monitor = _MonitorClient(credential, sub_id) if _MonitorClient else None
+
+        def _pool_metrics(resource_id):
+            """Return (allocated_gib, used_gib) for a pool from Monitor."""
+            if not monitor:
+                return None, None
+            try:
+                end   = datetime.datetime.now(datetime.timezone.utc)
+                start = end - datetime.timedelta(days=1)
+                ts    = f"{start.strftime('%Y-%m-%dT%H:%M:%SZ')}/{end.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+                res   = monitor.metrics.list(
+                    resource_id, timespan=ts, interval="PT1H",
+                    metricnames="allocated_data_storage,storage_used",
+                    aggregation="Maximum",
+                    metricnamespace="microsoft.sql/servers/elasticpools",
+                )
+                alloc = used = None
+                for m in res.value:
+                    for series in m.timeseries:
+                        for dp in reversed(series.data):
+                            if dp.maximum is not None:
+                                val = round(dp.maximum / 1_073_741_824, 4)
+                                if "allocated" in m.name.value.lower():
+                                    alloc = val
+                                else:
+                                    used = val
+                                break
+                return alloc, used
+            except Exception:
+                return None, None
+
+        for srv in safe_list(sql.servers.list()):
+            rg_s = rg_from_id(srv.id)
+            for pool in safe_list(sql.elastic_pools.list_by_server(rg_s, srv.name)):
+                sku_name   = pool.sku.name     if pool.sku else ""
+                tier       = pool.sku.tier     if pool.sku else ""
+                capacity   = pool.sku.capacity if pool.sku else ""
+                max_gib    = (pool.max_size_bytes or 0) / 1_073_741_824
+                alloc, used = _pool_metrics(pool.id)
+                # Count databases in this pool
+                try:
+                    db_count = sum(1 for _ in sql.databases.list_by_elastic_pool(rg_s, srv.name, pool.name))
+                except Exception:
+                    db_count = ""
+                rows.append({
+                    "Subscription":      sub_name,
+                    "Server":            srv.name,
+                    "Pool Name":         pool.name,
+                    "Resource Group":    rg_s,
+                    "Location":          pool.location or "",
+                    "SKU":               sku_name,
+                    "Tier":              tier,
+                    "eDTUs / vCores":    str(capacity),
+                    "Max Storage (GiB)": round(max_gib, 2),
+                    "Allocated (GiB)":   alloc,
+                    "Used (GiB)":        used,
+                    "Databases":         db_count,
+                    "Zone Redundant":    getattr(pool, "zone_redundant", False) or False,
+                })
+        if verbose:
+            log.info("SQL Elastic Pools %s: %d pools", sub_name, len(rows))
+    except Exception as exc:
+        log.warning("SQL Elastic Pools %s: %s", sub_name, exc)
+    return rows
+
+
+def collect_sql_vms(credential, sub_id, sub_name, verbose=False):
+    """Collect VMs that have SQL Server installed via the SQL VM extension."""
+    rows = []
+    sql_vm_names = set()
+    if _SqlVMClient is None:
+        return rows, sql_vm_names
+    try:
+        client = _SqlVMClient(credential, sub_id)
+        for sqlvm in safe_list(client.sql_virtual_machines.list()):
+            rg      = rg_from_id(sqlvm.id)
+            vm_name = sqlvm.virtual_machine_resource_id.split("/")[-1] if sqlvm.virtual_machine_resource_id else sqlvm.name
+            sql_vm_names.add(vm_name.lower())
+            rows.append({
+                "Subscription":       sub_name,
+                "VM Name":            vm_name,
+                "Resource Group":     rg,
+                "Location":           sqlvm.location or "",
+                "SQL Image Offer":    getattr(sqlvm, "sql_image_offer", "") or "",
+                "SQL Image SKU":      str(getattr(sqlvm, "sql_image_sku", "") or ""),
+                "SQL Management":     str(getattr(sqlvm, "sql_management", "") or ""),
+                "License Type":       str(getattr(sqlvm, "sql_server_license_type", "") or ""),
+                "Patching Day":       str(getattr(getattr(sqlvm, "auto_patching_settings", None), "day_of_week", "") or ""),
+                "Backup Enabled":     str(getattr(getattr(sqlvm, "auto_backup_settings", None), "enable", False) or False),
+            })
+        if verbose:
+            log.info("SQL VMs %s: %d found", sub_name, len(rows))
+    except Exception as exc:
+        log.warning("SQL VMs %s: %s", sub_name, exc)
+    return rows, sql_vm_names
 
 
 def collect_storage(credential, sub_id, sub_name, verbose=False):
@@ -732,12 +897,44 @@ def collect_netapp(credential, sub_id, sub_name, verbose=False):
 
 
 def collect_cosmosdb(credential, sub_id, sub_name, verbose=False):
-    """Collect Cosmos DB accounts."""
+    """Collect Cosmos DB accounts with live usage metrics."""
     rows = []
     if _CosmosClient is None:
         return rows
     try:
-        cosmos = _CosmosClient(credential, sub_id)
+        cosmos  = _CosmosClient(credential, sub_id)
+        monitor = _MonitorClient(credential, sub_id) if _MonitorClient else None
+
+        def _cosmos_metrics(resource_id):
+            """Return (data_gib, index_gib, doc_count, partition_count) from Monitor."""
+            if not monitor:
+                return None, None, None, None
+            try:
+                end   = datetime.datetime.now(datetime.timezone.utc)
+                start = end - datetime.timedelta(days=1)
+                ts    = f"{start.strftime('%Y-%m-%dT%H:%M:%SZ')}/{end.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+                res   = monitor.metrics.list(
+                    resource_id, timespan=ts, interval="PT1H",
+                    metricnames="DataUsage,IndexUsage,DocumentCount,PhysicalPartitionCount",
+                    aggregation="Maximum",
+                    metricnamespace="microsoft.documentdb/databaseaccounts",
+                )
+                vals = {}
+                for m in res.value:
+                    key = m.name.value.lower()
+                    for series in m.timeseries:
+                        for dp in reversed(series.data):
+                            if dp.maximum is not None:
+                                vals[key] = dp.maximum
+                                break
+                data_gib  = round(vals.get("datausage", 0) / 1_073_741_824, 4) if "datausage" in vals else None
+                index_gib = round(vals.get("indexusage", 0) / 1_073_741_824, 4) if "indexusage" in vals else None
+                doc_count = int(vals["documentcount"]) if "documentcount" in vals else None
+                part_cnt  = int(vals["physicalpartitioncount"]) if "physicalpartitioncount" in vals else None
+                return data_gib, index_gib, doc_count, part_cnt
+            except Exception:
+                return None, None, None, None
+
         for acct in safe_list(cosmos.database_accounts.list()):
             rg          = rg_from_id(acct.id)
             kind        = str(acct.kind or "")
@@ -750,17 +947,22 @@ def collect_cosmosdb(credential, sub_id, sub_name, verbose=False):
                 backup_mode = str(getattr(acct.backup_policy, "type", "") or "")
                 if hasattr(acct.backup_policy, "periodic_mode_properties") and acct.backup_policy.periodic_mode_properties:
                     backup_ret = str(acct.backup_policy.periodic_mode_properties.backup_retention_interval_in_hours or "")
+            data_gib, index_gib, doc_count, part_cnt = _cosmos_metrics(acct.id)
             rows.append({
-                "Subscription":     sub_name,
-                "Name":             acct.name,
-                "Resource Group":   rg,
-                "Locations":        locations,
-                "API Kind":         kind,
-                "Consistency":      consistency,
-                "Multi-Region Write":geo_redund,
-                "Backup Mode":      backup_mode,
-                "Backup Retention": backup_ret,
-                "Public Access":    str(acct.public_network_access or ""),
+                "Subscription":       sub_name,
+                "Name":               acct.name,
+                "Resource Group":     rg,
+                "Locations":          locations,
+                "API Kind":           kind,
+                "Consistency":        consistency,
+                "Multi-Region Write": geo_redund,
+                "Backup Mode":        backup_mode,
+                "Backup Retention":   backup_ret,
+                "Public Access":      str(acct.public_network_access or ""),
+                "Data (GiB)":         data_gib,
+                "Index (GiB)":        index_gib,
+                "Document Count":     doc_count,
+                "Partitions":         part_cnt,
             })
         if verbose:
             log.info("CosmosDB %s: %d accounts", sub_name, len(rows))
@@ -812,23 +1014,31 @@ def collect_aks(credential, sub_id, sub_name, verbose=False):
             if cluster.network_profile:
                 network = str(cluster.network_profile.network_plugin or "")
 
-            # Node pools
-            node_pools  = cluster.agent_pool_profiles or []
-            total_nodes = sum(p.count or 0 for p in node_pools)
-            pool_names  = ",".join(p.name for p in node_pools)
-            vm_sizes    = ",".join(dict.fromkeys(p.vm_size for p in node_pools if p.vm_size))
+            node_pools   = cluster.agent_pool_profiles or []
+            total_nodes  = sum(p.count or 0 for p in node_pools)
+            max_nodes    = sum(p.max_count or p.count or 0 for p in node_pools)
+            pool_names   = ",".join(p.name for p in node_pools)
+            vm_sizes     = ",".join(dict.fromkeys(p.vm_size for p in node_pools if p.vm_size))
+            os_disk_sizes= ",".join(
+                f"{p.name}:{p.os_disk_size_gb}GiB"
+                for p in node_pools if (p.os_disk_size_gb or 0) > 0
+            )
+            autoscale_on = any(getattr(p, "enable_auto_scaling", False) for p in node_pools)
 
             rows.append({
-                "Subscription":    sub_name,
-                "Cluster Name":    cluster.name,
-                "Resource Group":  rg,
-                "Location":        cluster.location or "",
-                "K8s Version":     version,
-                "Node Pools":      pool_names,
-                "Total Nodes":     total_nodes,
-                "Node VM Sizes":   vm_sizes,
-                "Network Plugin":  network,
-                "RBAC Enabled":    rbac,
+                "Subscription":      sub_name,
+                "Cluster Name":      cluster.name,
+                "Resource Group":    rg,
+                "Location":          cluster.location or "",
+                "K8s Version":       version,
+                "Node Pools":        pool_names,
+                "Current Nodes":     total_nodes,
+                "Max Nodes":         max_nodes,
+                "Autoscale":         autoscale_on,
+                "Node VM Sizes":     vm_sizes,
+                "OS Disk Sizes":     os_disk_sizes,
+                "Network Plugin":    network,
+                "RBAC Enabled":      rbac,
             })
         if verbose:
             log.info("AKS %s: %d clusters", sub_name, len(rows))
@@ -953,7 +1163,7 @@ def collect_redis(credential, sub_id, sub_name, verbose=False):
         return rows
     try:
         redis = _RedisClient(credential, sub_id)
-        for r in safe_list(redis.redis.list()):
+        for r in safe_list(redis.redis.list_by_subscription()):
             rg         = rg_from_id(r.id)
             sku        = ""
             capacity   = 0
@@ -1008,15 +1218,19 @@ def collect_backup(credential, sub_id, sub_name, verbose=False):
                     items = safe_list(bk_client.backup_protected_items.list(vault.name, rg))
                     item_count = len(items)
                     for item in items:
+                        props       = item.properties
+                        policy_id   = getattr(props, "policy_id", "") if props else ""
+                        policy_name = policy_id.split("/")[-1] if policy_id else ""
                         plan_rows.append({
                             "Subscription":     sub_name,
                             "Vault":            vault.name,
                             "Protected Item":   item.name.split(";")[-1] if item.name else "",
                             "Resource Group":   rg,
                             "Location":         vault.location or "",
-                            "Item Type":        str(getattr(item.properties, "workload_type", "") if item.properties else ""),
-                            "Protection Status":str(getattr(item.properties, "protection_status", "") if item.properties else ""),
-                            "Last Backup":      str(getattr(item.properties, "last_backup_time", "") if item.properties else ""),
+                            "Item Type":        str(getattr(props, "workload_type", "") if props else ""),
+                            "Protection Status":str(getattr(props, "protection_status", "") if props else ""),
+                            "Last Backup":      str(getattr(props, "last_backup_time", "") if props else ""),
+                            "Policy Name":      policy_name,
                         })
                 except Exception:
                     pass
@@ -1085,20 +1299,28 @@ def build_sheet_vms(wb, rows):
     headers = ["Subscription","Name","Resource Group","Location","VM Size",
                "OS Type","Power State","OS Disk (GiB)","Data Disks",
                "Data Disk (GiB)","Total Storage (GiB)","Zones",
-               "Environment","Owner","Backup Tag"]
+               "Environment","Owner","Backup Tag",
+               "MSSQL-INSTALLED","Backup Policy","Backup Protected"]
     r = _header_row(ws, headers)
     for i, row in enumerate(rows):
         vals = [row.get(h, "") for h in headers]
         for col, v in enumerate(vals, 1):
             c = ws.cell(row=r, column=col, value=v)
             c.alignment = LEFT; c.border = BORDER; c.font = NORMAL
-            if col == 1 and i % 2 == 1: c.fill = ALT_FILL
+            if i % 2 == 1: c.fill = ALT_FILL
         # Power state colouring (col 7)
         ps = str(row.get("Power State","")).lower()
         ws.cell(row=r, column=7).fill = (RED_FILL if "deallocated" in ps or "stopped" in ps
                                           else GREEN_FILL if "running" in ps else YELLOW_FILL)
+        # MSSQL-INSTALLED (col 16)
+        ws.cell(row=r, column=16).fill = (YELLOW_FILL if row.get("MSSQL-INSTALLED") == "Yes" else PatternFill())
+        # Backup Protected (col 18)
+        bp = str(row.get("Backup Protected","")).lower()
+        ws.cell(row=r, column=18).fill = (GREEN_FILL if bp == "yes"
+                                           else RED_FILL if bp == "no"
+                                           else PatternFill())
         r += 1
-    _set_col_widths(ws, [18,22,20,14,18,10,14,12,10,12,14,8,14,14,14])
+    _set_col_widths(ws, [18,22,20,14,18,10,14,12,10,12,14,8,14,14,14,16,18,16])
     _freeze(ws)
     return ws
 
@@ -1171,8 +1393,10 @@ def build_sheet_snapshots(wb, rows):
 def build_sheet_sql(wb, rows):
     ws = _new_sheet(wb, "Azure SQL")
     headers = ["Subscription","Type","Server / Instance","Database Name","Resource Group",
-               "Location","SKU","Tier","Capacity","Max Storage (GiB)","Backup Redundancy",
-               "Public Access","Encryption (TDE)","Availability Zone"]
+               "Location","SKU","Tier","Capacity","Max Storage (GiB)",
+               "Allocated (GiB)","Used (GiB)","Elastic Pool",
+               "PITR (Days)","LTR Weekly","LTR Monthly","LTR Yearly",
+               "Backup Redundancy","Public Access","Encryption (TDE)","Availability Zone"]
     r = _header_row(ws, headers)
     for i, row in enumerate(rows):
         vals = [row.get(h,"") for h in headers]
@@ -1180,13 +1404,16 @@ def build_sheet_sql(wb, rows):
             c = ws.cell(row=r, column=col, value=v)
             c.alignment = LEFT; c.border = BORDER; c.font = NORMAL
             if i % 2 == 1: c.fill = ALT_FILL
-        # Public access colouring (col 12)
+        # Public access colouring (col 19)
         pa = str(row.get("Public Access","")).lower()
-        ws.cell(row=r, column=12).fill = (RED_FILL if "enabled" in pa or "true" in pa
+        ws.cell(row=r, column=19).fill = (RED_FILL if "enabled" in pa or "true" in pa
                                            else GREEN_FILL if "disabled" in pa or "false" in pa
                                            else PatternFill())
+        # PITR days (col 14) — red if empty (no short-term backup configured)
+        pitr = row.get("PITR (Days)","")
+        ws.cell(row=r, column=14).fill = (RED_FILL if pitr == "" else GREEN_FILL)
         r += 1
-    _set_col_widths(ws, [18,20,24,20,20,14,14,12,10,14,16,14,14,14])
+    _set_col_widths(ws, [18,20,24,20,20,14,14,12,10,14,13,12,18,12,12,12,12,16,14,14,14])
     _freeze(ws)
     return ws
 
@@ -1339,7 +1566,8 @@ def build_sheet_netapp(wb, rows):
 def build_sheet_cosmosdb(wb, rows):
     ws = _new_sheet(wb, "Cosmos DB")
     headers = ["Subscription","Name","Resource Group","Locations","API Kind",
-               "Consistency","Multi-Region Write","Backup Mode","Backup Retention","Public Access"]
+               "Consistency","Multi-Region Write","Backup Mode","Backup Retention","Public Access",
+               "Data (GiB)","Index (GiB)","Document Count","Partitions"]
     r = _header_row(ws, headers)
     for i, row in enumerate(rows):
         vals = [row.get(h,"") for h in headers]
@@ -1348,7 +1576,7 @@ def build_sheet_cosmosdb(wb, rows):
             c.alignment = LEFT; c.border = BORDER; c.font = NORMAL
             if i % 2 == 1: c.fill = ALT_FILL
         r += 1
-    _set_col_widths(ws, [18,22,18,22,14,16,16,14,14,14])
+    _set_col_widths(ws, [18,22,18,22,14,16,16,14,14,14,12,12,14,12])
     _freeze(ws)
     return ws
 
@@ -1373,7 +1601,8 @@ def build_sheet_synapse(wb, rows):
 def build_sheet_aks(wb, rows):
     ws = _new_sheet(wb, "AKS")
     headers = ["Subscription","Cluster Name","Resource Group","Location","K8s Version",
-               "Node Pools","Total Nodes","Node VM Sizes","Network Plugin","RBAC Enabled"]
+               "Node Pools","Current Nodes","Max Nodes","Autoscale",
+               "Node VM Sizes","OS Disk Sizes","Network Plugin","RBAC Enabled"]
     r = _header_row(ws, headers)
     for i, row in enumerate(rows):
         vals = [row.get(h,"") for h in headers]
@@ -1381,8 +1610,10 @@ def build_sheet_aks(wb, rows):
             c = ws.cell(row=r, column=col, value=v)
             c.alignment = LEFT; c.border = BORDER; c.font = NORMAL
             if i % 2 == 1: c.fill = ALT_FILL
+        # Autoscale (col 9)
+        ws.cell(row=r, column=9).fill = (GREEN_FILL if row.get("Autoscale") else PatternFill())
         r += 1
-    _set_col_widths(ws, [18,22,20,14,12,20,10,24,14,12])
+    _set_col_widths(ws, [18,22,20,14,12,20,12,10,10,24,26,14,12])
     _freeze(ws)
     return ws
 
@@ -1479,7 +1710,7 @@ def build_sheet_backup_vaults(wb, rows):
 def build_sheet_backup_items(wb, rows):
     ws = _new_sheet(wb, "Backup Protected Items")
     headers = ["Subscription","Vault","Protected Item","Resource Group","Location",
-               "Item Type","Protection Status","Last Backup"]
+               "Item Type","Protection Status","Last Backup","Policy Name"]
     r = _header_row(ws, headers)
     for i, row in enumerate(rows):
         vals = [row.get(h,"") for h in headers]
@@ -1487,8 +1718,63 @@ def build_sheet_backup_items(wb, rows):
             c = ws.cell(row=r, column=col, value=v)
             c.alignment = LEFT; c.border = BORDER; c.font = NORMAL
             if i % 2 == 1: c.fill = ALT_FILL
+        # Protection status (col 7) colour
+        ps = str(row.get("Protection Status","")).lower()
+        ws.cell(row=r, column=7).fill = (GREEN_FILL if "protected" in ps and "not" not in ps
+                                          else RED_FILL if "not" in ps or "error" in ps
+                                          else PatternFill())
         r += 1
-    _set_col_widths(ws, [18,22,28,20,14,18,16,22])
+    _set_col_widths(ws, [18,22,28,20,14,18,16,22,22])
+    _freeze(ws)
+    return ws
+
+
+def build_sheet_elastic_pools(wb, rows):
+    ws = _new_sheet(wb, "SQL Elastic Pools")
+    headers = ["Subscription","Server","Pool Name","Resource Group","Location",
+               "SKU","Tier","eDTUs / vCores","Max Storage (GiB)",
+               "Allocated (GiB)","Used (GiB)","Databases","Zone Redundant"]
+    r = _header_row(ws, headers)
+    for i, row in enumerate(rows):
+        vals = [row.get(h,"") for h in headers]
+        for col, v in enumerate(vals, 1):
+            c = ws.cell(row=r, column=col, value=v)
+            c.alignment = LEFT; c.border = BORDER; c.font = NORMAL
+            if i % 2 == 1: c.fill = ALT_FILL
+    # Totals row
+    if rows:
+        r2 = len(rows) + 2
+        ws.cell(row=r2, column=1, value="TOTAL").font = BOLD
+        ws.merge_cells(start_row=r2, start_column=1, end_row=r2, end_column=5)
+        for col, key in [(9,"Max Storage (GiB)"), (10,"Allocated (GiB)"), (11,"Used (GiB)")]:
+            total = sum(x.get(key,0) for x in rows if isinstance(x.get(key),(int,float)))
+            c = ws.cell(row=r2, column=col, value=round(total,4))
+            c.font = Font(bold=True, color="FFFFFF", name="Calibri", size=10)
+            c.fill = HEADER_FILL; c.border = BORDER; c.alignment = CENTER
+    _set_col_widths(ws, [18,24,22,20,14,14,12,14,16,14,12,10,14])
+    _freeze(ws)
+    return ws
+
+
+def build_sheet_sql_vms(wb, rows):
+    ws = _new_sheet(wb, "SQL Server VMs")
+    headers = ["Subscription","VM Name","Resource Group","Location",
+               "SQL Image Offer","SQL Image SKU","SQL Management",
+               "License Type","Patching Day","Backup Enabled"]
+    r = _header_row(ws, headers)
+    for i, row in enumerate(rows):
+        vals = [row.get(h,"") for h in headers]
+        for col, v in enumerate(vals, 1):
+            c = ws.cell(row=r, column=col, value=v)
+            c.alignment = LEFT; c.border = BORDER; c.font = NORMAL
+            if i % 2 == 1: c.fill = ALT_FILL
+        # Backup enabled (col 10) — red if false
+        bk = str(row.get("Backup Enabled","")).lower()
+        ws.cell(row=r, column=10).fill = (GREEN_FILL if "true" in bk
+                                           else YELLOW_FILL if not bk
+                                           else RED_FILL)
+        r += 1
+    _set_col_widths(ws, [18,24,20,14,22,20,18,16,14,14])
     _freeze(ws)
     return ws
 
@@ -1859,6 +2145,8 @@ def build_workbook(data, output_path, sub_names):
     build_sheet_snapshots(wb,      data.get("snapshots", []))
     build_sheet_sql(wb,            data.get("sql", []))
     build_sheet_sql_mi_databases(wb, data.get("sql_mi_db", []))
+    build_sheet_elastic_pools(wb,  data.get("sql_pools", []))
+    build_sheet_sql_vms(wb,        data.get("sql_vms", []))
     build_sheet_storage(wb,        data.get("storage", []))
     build_sheet_file_shares(wb,    data.get("file_shares", []))
     build_sheet_netapp(wb,         data.get("netapp", []))
@@ -1884,20 +2172,21 @@ def collect_subscription(credential, sub_id, sub_name, args):
     log.info("Scanning subscription: %s (%s)", sub_name, sub_id)
 
     collectors = [
-        ("vms",           lambda: collect_vms(credential, sub_id, sub_name, verbose)),
-        ("disks",         lambda: collect_disks(credential, sub_id, sub_name, verbose)),
-        ("sql",           lambda: collect_sql(credential, sub_id, sub_name, verbose)),
-        ("sql_mi_db",     lambda: collect_sql_mi_databases(credential, sub_id, sub_name, verbose)),
-        ("storage",       lambda: collect_storage(credential, sub_id, sub_name, verbose)),
-        ("file_shares",   lambda: collect_file_shares(credential, sub_id, sub_name, verbose)),
-        ("cosmosdb",      lambda: collect_cosmosdb(credential, sub_id, sub_name, verbose)),
-        ("aks",           lambda: collect_aks(credential, sub_id, sub_name, verbose)),
-        ("aci",           lambda: collect_container_instances(credential, sub_id, sub_name, verbose)),
-        ("functions",     lambda: collect_functions(credential, sub_id, sub_name, verbose)),
-        ("redis",         lambda: collect_redis(credential, sub_id, sub_name, verbose)),
-        ("netapp",        lambda: collect_netapp(credential, sub_id, sub_name, verbose)),
-        ("avd",           lambda: collect_avd(credential, sub_id, sub_name, verbose)),
-        ("synapse",       lambda: collect_synapse(credential, sub_id, sub_name, verbose)),
+        ("vms",            lambda: collect_vms(credential, sub_id, sub_name, verbose)),
+        ("disks",          lambda: collect_disks(credential, sub_id, sub_name, verbose)),
+        ("sql",            lambda: collect_sql(credential, sub_id, sub_name, verbose)),
+        ("sql_mi_db",      lambda: collect_sql_mi_databases(credential, sub_id, sub_name, verbose)),
+        ("sql_pools",      lambda: collect_sql_elastic_pools(credential, sub_id, sub_name, verbose)),
+        ("storage",        lambda: collect_storage(credential, sub_id, sub_name, verbose)),
+        ("file_shares",    lambda: collect_file_shares(credential, sub_id, sub_name, verbose)),
+        ("cosmosdb",       lambda: collect_cosmosdb(credential, sub_id, sub_name, verbose)),
+        ("aks",            lambda: collect_aks(credential, sub_id, sub_name, verbose)),
+        ("aci",            lambda: collect_container_instances(credential, sub_id, sub_name, verbose)),
+        ("functions",      lambda: collect_functions(credential, sub_id, sub_name, verbose)),
+        ("redis",          lambda: collect_redis(credential, sub_id, sub_name, verbose)),
+        ("netapp",         lambda: collect_netapp(credential, sub_id, sub_name, verbose)),
+        ("avd",            lambda: collect_avd(credential, sub_id, sub_name, verbose)),
+        ("synapse",        lambda: collect_synapse(credential, sub_id, sub_name, verbose)),
     ]
 
     if not args.skip_snapshots:
@@ -1911,10 +2200,35 @@ def collect_subscription(credential, sub_id, sub_name, args):
             log.warning("Collector '%s' failed for %s: %s", name, sub_name, exc)
             results[name] = []
 
-    # Backup (returns tuple)
+    # SQL VMs (returns tuple: rows + name set)
+    sqlvm_rows, sql_vm_names = collect_sql_vms(credential, sub_id, sub_name, verbose)
+    results["sql_vms"] = sqlvm_rows
+
+    # Backup (returns tuple: vault rows + item rows)
     vault_rows, item_rows = collect_backup(credential, sub_id, sub_name, verbose)
     results["backup_vaults"] = vault_rows
     results["backup_items"]  = item_rows
+
+    # Cross-reference: stamp SQL Server flag and backup policy onto each VM row
+    if sql_vm_names or item_rows:
+        # Build lookup: vm_name_lower -> policy_name (first match wins)
+        backup_policy_map = {}
+        for itm in item_rows:
+            item_name = itm.get("Protected Item", "").lower()
+            policy    = itm.get("Policy Name", "")
+            if item_name and item_name not in backup_policy_map:
+                backup_policy_map[item_name] = policy
+
+        for vm_row in results.get("vms", []):
+            vm_lower = vm_row["Name"].lower()
+            if vm_lower in sql_vm_names:
+                vm_row["MSSQL-INSTALLED"] = "Yes"
+            policy = backup_policy_map.get(vm_lower, "")
+            if policy:
+                vm_row["Backup Policy"]    = policy
+                vm_row["Backup Protected"] = "Yes"
+            elif not vm_row["Backup Policy"]:
+                vm_row["Backup Protected"] = "No"
 
     return results
 
