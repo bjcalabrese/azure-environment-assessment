@@ -148,21 +148,7 @@ python azure_assessment.py \
   --verbose
 ```
 
-### Interactive launcher (all platforms)
-
-The included `run.ps1` handles everything interactively — no need to type flags manually:
-
-```powershell
-.\run.ps1                                # interactive menu
-.\run.ps1 -AllSubscriptions             # skip subscription picker
-.\run.ps1 -AllSubscriptions -SkipSnapshots -Workers 8
-.\run.ps1 -Subscription "00000000-..." -Output "Customer.xlsx"
-.\run.ps1 -DryRun                       # preview the command without running it
-```
-
-Requires PowerShell 7+ (`pwsh`). Install with `brew install --cask powershell` on macOS or via the [PowerShell releases page](https://github.com/PowerShell/PowerShell/releases) on Windows/Linux.
-
-### Windows users (PowerShell — direct)
+### Windows users (PowerShell)
 
 ```powershell
 # Basic scan
@@ -368,5 +354,4 @@ The full source code is in this repository. There are no compiled binaries, no o
 |---|---|
 | `azure_assessment.py` | The assessment script |
 | `requirements.txt` | Python dependencies |
-| `run.ps1` | Interactive PowerShell launcher — checks prerequisites, guides subscription selection, runs the scan, opens the output file |
 | `QUICKSTART.md` | Step-by-step setup guide |
