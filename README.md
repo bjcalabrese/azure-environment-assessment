@@ -261,7 +261,7 @@ The **Reader** role grants access to all `*/read` actions across every resource 
 | **Managed Disks** | SKU, size, IOPS, throughput, encryption type, disk state (attached/unattached), attached VM |
 | **Disk Snapshots** | Source disk, size, encryption, creation date, age in days |
 | **Azure SQL** | Server, database, SKU, tier, max/allocated/used storage, elastic pool, PITR days, LTR weekly/monthly/yearly retention, backup redundancy, public access, TDE status |
-| **SQL MI Databases** | Managed Instance, database name, vCores, storage, status, collation, earliest restore point |
+| **SQL MI Databases** | Managed Instance, database name, license type, vCores, storage, status, collation, earliest restore point, PITR days, LTR weekly/monthly/yearly retention |
 | **SQL Elastic Pools** | Pool name, SKU, tier, eDTUs/vCores, max/allocated/used storage, database count, zone redundancy |
 | **SQL Server VMs** | VMs with SQL Server extension: image offer/SKU, license type, patching day, backup enabled |
 | **Storage Accounts** | SKU, kind, HTTPS-only, public blob access, encryption key source, blob tier breakdown (hot/cool/cold/archive), file size, total size |
@@ -276,6 +276,8 @@ The **Reader** role grants access to all `*/read` actions across every resource 
 | **Redis Cache** | SKU, capacity, Redis version, TLS settings, geo-replication |
 | **Backup Vaults** | Redundancy type, protected items count |
 | **Backup Protected Items** | Vault, item name, item type, protection status, last backup time, policy name |
+| **Backup SQL Items** | SQL Server and SQL database protected items (AzureWorkload) across all vaults: server/instance, database, workload type, protection status, last backup status, policy name |
+| **Backup Policies** | All VM and SQL backup policies across all vaults: schedule frequency, daily/weekly/monthly/yearly retention |
 | **Backup Costs** | Recovery Services Vault spend over the last 30 days per vault, with totals |
 | **Monthly Cloud Spend** | Azure spend by service category for the current month and previous month, with month-over-month change; top services also surfaced on the Summary dashboard |
 
