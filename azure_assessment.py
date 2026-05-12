@@ -2334,8 +2334,8 @@ def build_summary_sheet(wb, data, sub_names):
                         or str(v.get("Backup Protected","")).lower() == "yes")
     if len(vms) > 0:
         bk_pct = round(vms_protected / len(vms) * 100)
-        bk_label = f"VM BACKUP\nCOVERAGE"
-        bk_value = f"{vms_protected}/{len(vms)}\n({bk_pct}%)"
+        bk_label = f"VM BACKUP\n{bk_pct}% COVERED"
+        bk_value = f"{vms_protected}/{len(vms)}"
     else:
         bk_label = "VM BACKUP\nCOVERAGE"
         bk_value = "N/A"
@@ -2364,7 +2364,7 @@ def build_summary_sheet(wb, data, sub_names):
         (spend_label,        spend_value),
     ]
 
-    ws.row_dimensions[3].height = 6
+    ws.row_dimensions[3].height = 8
     for col, (label, value) in enumerate(kpis, 1):
         ws.merge_cells(start_row=4, start_column=col, end_row=4, end_column=col)
         ws.merge_cells(start_row=5, start_column=col, end_row=5, end_column=col)
@@ -2374,9 +2374,9 @@ def build_summary_sheet(wb, data, sub_names):
         lr = ws.cell(row=5, column=col, value=label)
         lr.fill = KPI_FILL; lr.font = KPI_LBL; lr.alignment = CENTER
         ws.cell(row=6, column=col).fill = KPI_FILL
-        ws.row_dimensions[4].height = 32
-        ws.row_dimensions[5].height = 22
-        ws.row_dimensions[6].height = 4
+    ws.row_dimensions[4].height = 38
+    ws.row_dimensions[5].height = 26
+    ws.row_dimensions[6].height = 6
 
     ws.row_dimensions[7].height = 8  # spacer
 
@@ -2476,7 +2476,7 @@ def build_summary_sheet(wb, data, sub_names):
 
     r2 = 8
     r2 = section_header(r2, 5, 8, "Risk & Findings")
-    r2 = mini_header(r2, ["Severity", "Finding", "Count"], 5)
+    r2 = mini_header(r2, ["Severity", "Finding", "", "Count"], 5)
 
     sev_fills = {"CRITICAL": CRIT_FILL, "HIGH": HIGH_FILL, "MEDIUM": MED_FILL}
     for severity, finding, count in findings:
@@ -2666,8 +2666,10 @@ def build_summary_sheet(wb, data, sub_names):
          "Stale"       in str(d.get("Snapshot Coverage","")))
     )
 
-    # Column widths for summary
-    col_w = [20, 14, 14, 14, 16, 32, 8, 14]
+    # Column widths — balanced for KPI tiles (one per col) and body sections
+    # Left body: A=workload name, B=count, C=GiB, D=TiB
+    # Right body: E=severity, F+G=finding text (merged), H=count
+    col_w = [24, 11, 14, 12, 13, 24, 20, 14]
     for col, w in enumerate(col_w, 1):
         ws.column_dimensions[get_column_letter(col)].width = w
 

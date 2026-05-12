@@ -246,12 +246,15 @@ The **Reader** role grants access to all `*/read` actions across every resource 
 
 | Section | What it shows |
 |---|---|
-| **KPI tiles** | Total resources, total storage (TiB), VMs running/stopped, SQL databases, storage accounts, AKS clusters, current month cloud spend |
-| **Workload inventory** | Every service type with resource count and storage in GiB/TiB |
-| **Risk & Findings** | Colour-coded CRITICAL / HIGH / MEDIUM findings — public blob access, SQL with public access, storage without HTTPS-only, unattached disks, Redis with non-SSL port, VMs without backup |
-| **Azure Backup infrastructure** | Vault count and total protected items |
+| **KPI tiles** | Total resources, total storage (TiB), VMs running/stopped, SQL databases, storage accounts, VM backup coverage (protected/total %), current month cloud spend |
+| **Workload inventory** | Every service type with resource count and storage in GiB/TiB — including SQL MI, Elastic Pools, and SQL Server VMs |
+| **Risk & Findings** | Colour-coded CRITICAL / HIGH / MEDIUM findings — public blob access, SQL with public access, storage without HTTPS-only, unattached disks, Redis with non-SSL port, SQL Server VMs without backup, VMs without backup, no soft delete |
+| **Azure Backup infrastructure** | Vault count, VM protected items count, SQL protected items count |
 | **Region distribution** | How many resources are in each Azure region |
 | **Storage by service** | Which services consume the most storage, ranked |
+| **Backup sizing summary** | Protectable storage by service type (managed disks, blob, files, ANF, SQL MI) with suggested backup method |
+| **Disk snapshot coverage** | Breakdown of disks by snapshot age — current, aging, stale, no snapshot |
+| **Monthly spend by service** | Top 10 Azure services by current-month cost |
 
 ### Detail sheets (one per service)
 
