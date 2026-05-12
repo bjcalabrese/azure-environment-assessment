@@ -37,6 +37,27 @@ If you can run `az account show` and see your subscription, you're ready.
 
 ---
 
+## Setup wizard (recommended for first-time use)
+
+The setup wizard detects your OS, installs prerequisites, guides you through Azure authentication, and launches the assessment — no manual steps required.
+
+```bash
+python setup_wizard.py
+```
+
+Works on **Windows**, **macOS**, and **Linux**. Requires only Python 3.8+ to start (it will check for 3.10+ and guide you through upgrading if needed).
+
+The wizard walks you through 7 steps:
+1. Python version check with OS-specific upgrade instructions
+2. Azure CLI check with install instructions per OS
+3. `pip install -r requirements.txt` with live output
+4. Authentication — interactive login, service principal, or existing env vars
+5. Subscription selection — all, specific, or current
+6. Scan options — skip snapshots, workers, output filename, anonymize
+7. Run the assessment and open the workbook
+
+---
+
 ## Quickstart
 
 ```bash
@@ -361,5 +382,6 @@ The full source code is in this repository. There are no compiled binaries, no o
 | File | Purpose |
 |---|---|
 | `azure_assessment.py` | The assessment script |
+| `setup_wizard.py` | Interactive setup wizard — detects OS, installs prerequisites, guides auth and launches the scan |
 | `requirements.txt` | Python dependencies |
 | `QUICKSTART.md` | Step-by-step setup guide |
