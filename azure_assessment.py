@@ -2297,15 +2297,20 @@ def build_summary_sheet(wb, data, sub_names):
     ws.row_dimensions[2].height = 16
 
     # ── KPI tiles (row 4-6, columns A-H) ─────────────────────────────────────
-    vms        = data.get("vms", [])
-    disks      = data.get("disks", [])
-    snapshots  = data.get("snapshots", [])
-    sql        = data.get("sql", [])
-    storage    = data.get("storage", [])
-    aks        = data.get("aks", [])
-    functions  = data.get("functions", [])
-    vaults     = data.get("backup_vaults", [])
-    cloud_spend= data.get("cloud_spend", [])
+    vms         = data.get("vms", [])
+    disks       = data.get("disks", [])
+    snapshots   = data.get("snapshots", [])
+    sql         = data.get("sql", [])
+    sql_mi_db   = data.get("sql_mi_db", [])
+    sql_pools   = data.get("sql_pools", [])
+    sql_vms     = data.get("sql_vms", [])
+    storage     = data.get("storage", [])
+    aks         = data.get("aks", [])
+    functions   = data.get("functions", [])
+    vaults      = data.get("backup_vaults", [])
+    backup_items= data.get("backup_items", [])
+    backup_sql  = data.get("backup_sql_items", [])
+    cloud_spend = data.get("cloud_spend", [])
 
     total_resources = (len(vms) + len(disks) + len(snapshots) + len(sql) +
                        len(storage) + len(data.get("netapp", [])) +
@@ -2322,6 +2327,18 @@ def build_summary_sheet(wb, data, sub_names):
     running  = sum(1 for v in vms if "running" in str(v.get("Power State","")).lower())
     stopped  = len(vms) - running
     unattach = sum(1 for d in disks if "unattached" in str(d.get("Disk State","")).lower())
+
+    # VM backup coverage
+    protected_vm_names = {str(i.get("Protected Item","")).lower() for i in backup_items}
+    vms_protected = sum(1 for v in vms if str(v.get("Name","")).lower() in protected_vm_names
+                        or str(v.get("Backup Protected","")).lower() == "yes")
+    if len(vms) > 0:
+        bk_pct = round(vms_protected / len(vms) * 100)
+        bk_label = f"VM BACKUP\nCOVERAGE"
+        bk_value = f"{vms_protected}/{len(vms)}\n({bk_pct}%)"
+    else:
+        bk_label = "VM BACKUP\nCOVERAGE"
+        bk_value = "N/A"
 
     # Monthly spend — sum all current-month cost columns across all spend rows
     cur_month_spend = 0.0
@@ -2343,7 +2360,7 @@ def build_summary_sheet(wb, data, sub_names):
         ("VMs\nStopped",     stopped),
         ("SQL\nDatabases",   len(sql)),
         ("Storage\nAccounts",len(storage)),
-        ("AKS\nClusters",    len(aks)),
+        (bk_label,           bk_value),
         (spend_label,        spend_value),
     ]
 
@@ -2398,8 +2415,11 @@ def build_summary_sheet(wb, data, sub_names):
         ("Managed Disks",           disks,                        stor_gib_for(disks,"Size (GiB)")),
         ("Disk Snapshots",          snapshots,                    stor_gib_for(snapshots,"Size (GiB)")),
         ("Azure SQL",               sql,                          0),
+        ("SQL Managed Instances",   sql_mi_db,                    stor_gib_for(sql_mi_db,"Instance Storage (GiB)")),
+        ("SQL Elastic Pools",       sql_pools,                    0),
+        ("SQL Server VMs",          sql_vms,                      0),
         ("Storage Accounts",        storage,                      stor_gib),
-        ("Azure File Shares",        data.get("file_shares",[]),   stor_gib_for(data.get("file_shares",[]),"Quota (GiB)")),
+        ("Azure File Shares",       data.get("file_shares",[]),   stor_gib_for(data.get("file_shares",[]),"Quota (GiB)")),
         ("Azure NetApp Files",      data.get("netapp",[]),        stor_gib_for(data.get("netapp",[]),"Quota (GiB)")),
         ("Cosmos DB",               data.get("cosmosdb",[]),      0),
         ("Synapse Analytics",       data.get("synapse",[]),       0),
@@ -2438,16 +2458,20 @@ def build_summary_sheet(wb, data, sub_names):
     no_file_soft_delete  = sum(1 for s in storage if s.get("File Soft Delete (days)") == ""
                                and ("Files" in s.get("Active Services","") or
                                     "Files" in s.get("Service Type","")))
+    mssql_no_backup = sum(1 for v in vms
+                          if v.get("MSSQL-INSTALLED") == "Yes"
+                          and str(v.get("Backup Protected","")).lower() != "yes")
 
     findings = [
-        ("CRITICAL", "Public Blob Access Enabled",          public_storage),
-        ("CRITICAL", "SQL with Public Network Access",      public_sql),
-        ("HIGH",     "Storage Without HTTPS-Only",          http_storage),
-        ("HIGH",     "Unattached Managed Disks",            unattached_disks),
-        ("HIGH",     "Redis with Non-SSL Port Enabled",     non_ssl_redis),
-        ("HIGH",     "Blob Storage: No Soft Delete",        no_blob_soft_delete),
-        ("HIGH",     "Azure Files: No Soft Delete",         no_file_soft_delete),
-        ("MEDIUM",   "VMs Without Backup Coverage",         vms_no_backup),
+        ("CRITICAL", "Public Blob Access Enabled",              public_storage),
+        ("CRITICAL", "SQL with Public Network Access",          public_sql),
+        ("HIGH",     "Storage Without HTTPS-Only",              http_storage),
+        ("HIGH",     "Unattached Managed Disks",                unattached_disks),
+        ("HIGH",     "Redis with Non-SSL Port Enabled",         non_ssl_redis),
+        ("HIGH",     "Blob Storage: No Soft Delete",            no_blob_soft_delete),
+        ("HIGH",     "Azure Files: No Soft Delete",             no_file_soft_delete),
+        ("HIGH",     "SQL Server VMs Without Backup Coverage",  mssql_no_backup),
+        ("MEDIUM",   "VMs Without Backup Coverage",             vms_no_backup),
     ]
 
     r2 = 8
@@ -2474,8 +2498,9 @@ def build_summary_sheet(wb, data, sub_names):
     r2 = section_header(r2, 5, 8, "Azure Backup Infrastructure")
     total_protected = sum(v.get("Protected Items",0) for v in vaults)
     backup_stats = [
-        ("Recovery Services Vaults", len(vaults)),
-        ("Total Protected Items",    total_protected),
+        ("Recovery Services Vaults",  len(vaults)),
+        ("VM Protected Items",        total_protected),
+        ("SQL Protected Items",       len(backup_sql)),
     ]
     for k, v in backup_stats:
         ws.cell(row=r2, column=5, value=k).font = NORMAL
@@ -2573,13 +2598,15 @@ def build_summary_sheet(wb, data, sub_names):
     disk_gib_total = stor_gib_for(disks, "Size (GiB)")
     anf_gib_total  = stor_gib_for(data.get("netapp",[]), "Quota (GiB)")
     fs_gib_total   = stor_gib_for(data.get("file_shares",[]), "Quota (GiB)")
+    mi_gib_total   = stor_gib_for(sql_mi_db, "Instance Storage (GiB)")
 
     sizing = [
-        ("Managed Disks",      disk_gib_total,  "Azure Backup for Disks / Snapshots"),
-        ("Blob Storage",       blob_gib_total,  "Azure Backup for Blobs / Versioning"),
-        ("Azure Files",        file_gib_total + fs_gib_total, "Azure Backup for Files / File Sync"),
-        ("Azure NetApp Files", anf_gib_total,   "ANF Snapshots / CRR"),
-        ("Azure SQL",          0,               "Azure Backup for SQL / Auto-backup"),
+        ("Managed Disks",          disk_gib_total,              "Azure Backup for Disks / Snapshots"),
+        ("Blob Storage",           blob_gib_total,              "Azure Backup for Blobs / Versioning"),
+        ("Azure Files",            file_gib_total + fs_gib_total, "Azure Backup for Files / File Sync"),
+        ("Azure NetApp Files",     anf_gib_total,               "ANF Snapshots / CRR"),
+        ("Azure SQL",              0,                           "Azure Backup for SQL / Auto-backup"),
+        ("SQL Managed Instances",  mi_gib_total,                "Azure Backup for SQL MI / Auto-backup"),
     ]
     grand_gib = sum(g for _, g, _ in sizing)
 
