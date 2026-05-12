@@ -39,13 +39,27 @@ If you can run `az account show` and see your subscription, you're ready.
 
 ## Setup wizard (recommended for first-time use)
 
-The setup wizard detects your OS, installs prerequisites, guides you through Azure authentication, and launches the assessment — no manual steps required.
+Use the launcher for your OS — it installs Python automatically if it isn't present, then hands off to the interactive wizard. No prerequisites needed to start.
 
-```bash
-python setup_wizard.py
+**Windows** (PowerShell — right-click → Run with PowerShell, or):
+```powershell
+.\Start-Assessment.ps1
+```
+If your execution policy blocks scripts, run once with:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Start-Assessment.ps1
 ```
 
-Works on **Windows**, **macOS**, and **Linux**. Requires only Python 3.8+ to start (it will check for 3.10+ and guide you through upgrading if needed).
+**macOS / Linux** (Terminal):
+```bash
+./start-assessment.sh
+```
+If the script isn't executable yet:
+```bash
+chmod +x start-assessment.sh && ./start-assessment.sh
+```
+
+The launcher checks for Python 3.10+. If it isn't installed it uses `winget` (Windows), Homebrew (macOS), or your system package manager (`apt`, `dnf`, `yum`, `pacman`) to install it automatically, then launches the wizard.
 
 The wizard walks you through 7 steps:
 1. Python version check with OS-specific upgrade instructions
@@ -383,5 +397,7 @@ The full source code is in this repository. There are no compiled binaries, no o
 |---|---|
 | `azure_assessment.py` | The assessment script |
 | `setup_wizard.py` | Interactive setup wizard — detects OS, installs prerequisites, guides auth and launches the scan |
+| `Start-Assessment.ps1` | Windows launcher — installs Python via winget if missing, then runs the wizard |
+| `start-assessment.sh` | macOS / Linux launcher — installs Python via Homebrew or system package manager if missing, then runs the wizard |
 | `requirements.txt` | Python dependencies |
 | `QUICKSTART.md` | Step-by-step setup guide |

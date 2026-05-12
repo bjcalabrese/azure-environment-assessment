@@ -2,13 +2,29 @@
 
 ## Fastest path — Setup Wizard
 
-Run the wizard and follow the prompts. It handles everything below automatically.
+Use the launcher for your OS. It installs Python automatically if you don't have it, then walks you through everything interactively.
 
-```bash
-python setup_wizard.py
+**Windows** — open PowerShell in the project folder and run:
+```powershell
+.\Start-Assessment.ps1
+```
+If your execution policy blocks scripts, use:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Start-Assessment.ps1
 ```
 
-Works on Windows, macOS, and Linux. Skip to [Step 4](#step-4--open-the-workbook) after the wizard finishes.
+**macOS / Linux** — open Terminal in the project folder and run:
+```bash
+./start-assessment.sh
+```
+If needed, make it executable first:
+```bash
+chmod +x start-assessment.sh && ./start-assessment.sh
+```
+
+The launchers automatically install Python via `winget` (Windows), Homebrew (macOS), or your system package manager (Linux) if it isn't already present.
+
+Skip to [Step 4](#step-4--open-the-workbook) after the wizard finishes.
 
 ---
 
@@ -110,6 +126,7 @@ Options:
   --output FILENAME                    Output .xlsx filename
   --workers N                          Parallel subscription workers, default 4
   --skip-snapshots                     Skip disk snapshot enumeration (faster)
+  --anonymize                          Replace resource names with opaque codes; saves a reversible mapping CSV
   --verbose                            Show detailed logging
 ```
 
@@ -238,6 +255,7 @@ The Reader role includes all `*/read` actions needed by this tool. No custom pol
 | Scanning 5+ subscriptions | `--workers 6` |
 | Both of the above | `--all-subscriptions --skip-snapshots --workers 6` |
 | First run / debugging | `--verbose` |
+| Sharing output with external parties | `--anonymize` |
 
 ---
 
@@ -246,24 +264,31 @@ The Reader role includes all `*/read` actions needed by this tool. No custom pol
 ### Summary sheet layout
 
 ```
-┌─────────────────────────────────────────────────┐
-│         Azure Environment Assessment            │  ← Title + subscription/date
-├──────────┬──────────┬──────────┬──────────┬─────┤
-│  TOTAL   │ STORAGE  │  VMs     │  VMs     │ ... │  ← KPI tiles
-│RESOURCES │  (TiB)   │ Running  │ Stopped  │     │
-├──────────┴──────────┴──────────┴──────────┴─────┤
-│                                                  │
-│  Workload Inventory    │  Risk & Findings        │
-│  (left column)         │  (right column)         │
-│                        │                         │
-│  Virtual Machines  45  │  CRITICAL  Public Blob  │
-│  Managed Disks     80  │  HIGH      No HTTPS     │
-│  Azure SQL         12  │  MEDIUM    No Backup    │
-│  Storage Accounts  28  │                         │
-│  ...               ..  │  Backup Infrastructure  │
-│                        │  Region Distribution    │
-│                        │  Storage by Service     │
-└────────────────────────┴─────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│               Azure Environment Assessment                       │  ← Title + subscription/date
+├──────────┬──────────┬──────────┬──────────┬──────────┬──────────┤
+│  TOTAL   │ STORAGE  │  VMs     │  VMs     │  AZURE   │  VM      │  ← KPI tiles (8 total)
+│RESOURCES │  (TiB)   │ Running  │ Stopped  │   SQL    │  BACKUP  │
+│          │          │          │          │   DBs    │ COVERED  │
+├──────────┴──────────┴──────────┴──────────┴──────────┴──────────┤
+│                                                                   │
+│  Workload Inventory         │  Risk & Findings                   │
+│  (left column)              │  (right column)                    │
+│                             │                                    │
+│  Virtual Machines      45   │  CRITICAL  Public Blob Access      │
+│  Managed Disks         80   │  HIGH      SQL Public Endpoint     │
+│  Azure SQL Databases   12   │  HIGH      No HTTPS-only Storage   │
+│  SQL Managed Instances  3   │  HIGH      SQL VMs Without Backup  │
+│  SQL Elastic Pools      2   │  MEDIUM    Unattached Disks        │
+│  SQL Server VMs         5   │  MEDIUM    VMs Without Backup      │
+│  Storage Accounts      28   │                                    │
+│  ...                   ..   │  Backup Infrastructure             │
+│                             │  Region Distribution               │
+│                             │  Storage by Service                │
+│                             │  Backup Sizing Summary             │
+│                             │  Disk Snapshot Coverage            │
+│                             │  Monthly Spend by Service          │
+└─────────────────────────────┴────────────────────────────────────┘
 ```
 
 ### Colour coding
