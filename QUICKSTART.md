@@ -1,5 +1,19 @@
 # Quick Start Guide
 
+## Fastest path — Setup Wizard
+
+Run the wizard and follow the prompts. It handles everything below automatically.
+
+```bash
+python setup_wizard.py
+```
+
+Works on Windows, macOS, and Linux. Skip to [Step 4](#step-4--open-the-workbook) after the wizard finishes.
+
+---
+
+## Manual setup
+
 > **Disclaimer:** This is a community sample script provided without support guarantees. It is not an official product and is not covered by any support agreement. Use at your own risk.
 
 This guide gets you from zero to a completed Azure assessment in under 10 minutes.
