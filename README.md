@@ -148,7 +148,21 @@ python azure_assessment.py \
   --verbose
 ```
 
-### Windows users (PowerShell)
+### Interactive launcher (all platforms)
+
+The included `run.ps1` handles everything interactively — no need to type flags manually:
+
+```powershell
+.\run.ps1                                # interactive menu
+.\run.ps1 -AllSubscriptions             # skip subscription picker
+.\run.ps1 -AllSubscriptions -SkipSnapshots -Workers 8
+.\run.ps1 -Subscription "00000000-..." -Output "Customer.xlsx"
+.\run.ps1 -DryRun                       # preview the command without running it
+```
+
+Requires PowerShell 7+ (`pwsh`). Install with `brew install --cask powershell` on macOS or via the [PowerShell releases page](https://github.com/PowerShell/PowerShell/releases) on Windows/Linux.
+
+### Windows users (PowerShell — direct)
 
 ```powershell
 # Basic scan
@@ -256,21 +270,25 @@ The **Reader** role grants access to all `*/read` actions across every resource 
 
 | Sheet | What you get |
 |---|---|
-| **Virtual Machines** | Name, size (SKU), OS type, power state, OS disk, data disks, total storage, zones, tags |
+| **Virtual Machines** | Name, size (SKU), OS type, power state, OS disk, data disks, total storage, zones, tags, MSSQL-INSTALLED flag, backup policy name, backup protected status |
 | **Managed Disks** | SKU, size, IOPS, throughput, encryption type, disk state (attached/unattached), attached VM |
 | **Disk Snapshots** | Source disk, size, encryption, creation date, age in days |
-| **Azure SQL** | Server, database, SKU, tier, max storage, backup redundancy, public network access, TDE status |
-| **Storage Accounts** | SKU, kind, HTTPS-only, public blob access, encryption key source, blob size, file size |
-| **Azure NetApp Files** | Account, pool, volume, service level, quota, protocols, snapshot policy |
-| **Cosmos DB** | API kind, consistency level, multi-region write, backup mode and retention, public access |
+| **Azure SQL** | Server, database, SKU, tier, max/allocated/used storage, elastic pool, PITR days, LTR weekly/monthly/yearly retention, backup redundancy, public access, TDE status |
+| **SQL MI Databases** | Managed Instance, database name, vCores, storage, status, collation, earliest restore point |
+| **SQL Elastic Pools** | Pool name, SKU, tier, eDTUs/vCores, max/allocated/used storage, database count, zone redundancy |
+| **SQL Server VMs** | VMs with SQL Server extension: image offer/SKU, license type, patching day, backup enabled |
+| **Storage Accounts** | SKU, kind, HTTPS-only, public blob access, encryption key source, blob tier breakdown (hot/cool/cold/archive), file size, total size |
+| **Azure File Shares** | Share name, protocol, access tier, quota, used size, UNC/mount path |
+| **Azure NetApp Files** | Account, pool, volume, service level, quota, used size, throughput, protocols, mount path, snapshot details |
+| **Cosmos DB** | API kind, consistency level, multi-region write, backup mode and retention, public access, live data/index size (GiB), document count, partition count |
 | **Synapse Analytics** | Workspace, SQL pool, SKU, status, geo-backup |
-| **AKS** | Cluster version, node pools, total nodes, node VM sizes, network plugin, RBAC |
+| **AKS** | Cluster version, node pools, current/max node count, autoscale flag, node VM sizes, OS disk sizes per pool, network plugin, RBAC |
 | **Container Instances** | Container group, OS type, CPU, memory, state, IP address |
 | **Function Apps** | Runtime, OS type, app service plan, state |
 | **Azure Virtual Desktop** | Host pool type, load balancer, max sessions, session host count |
 | **Redis Cache** | SKU, capacity, Redis version, TLS settings, geo-replication |
 | **Backup Vaults** | Redundancy type, protected items count |
-| **Backup Protected Items** | Vault, item name, item type, protection status, last backup time |
+| **Backup Protected Items** | Vault, item name, item type, protection status, last backup time, policy name |
 
 ---
 
@@ -350,4 +368,5 @@ The full source code is in this repository. There are no compiled binaries, no o
 |---|---|
 | `azure_assessment.py` | The assessment script |
 | `requirements.txt` | Python dependencies |
+| `run.ps1` | Interactive PowerShell launcher — checks prerequisites, guides subscription selection, runs the scan, opens the output file |
 | `QUICKSTART.md` | Step-by-step setup guide |

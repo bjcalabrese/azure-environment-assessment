@@ -6,6 +6,30 @@ This guide gets you from zero to a completed Azure assessment in under 10 minute
 
 ---
 
+## Option A — Interactive launcher (recommended)
+
+If you have PowerShell 7+ (`pwsh`) installed, just run:
+
+```powershell
+.\run.ps1
+```
+
+It checks prerequisites, guides you through subscription selection, runs the scan, and opens the output file automatically. Use `-DryRun` to preview the command without executing it.
+
+```powershell
+.\run.ps1 -AllSubscriptions -SkipSnapshots   # fastest full scan
+.\run.ps1 -DryRun -AllSubscriptions           # preview only
+```
+
+Install PowerShell 7 if needed:
+- **macOS:** `brew install --cask powershell`
+- **Windows:** download from [github.com/PowerShell/PowerShell](https://github.com/PowerShell/PowerShell/releases)
+- **Linux:** `snap install powershell --classic`
+
+---
+
+## Option B — Run directly with Python
+
 ## Step 1 — Install Python dependencies
 
 You need Python 3.10 or later. Check with `python --version`.
@@ -14,7 +38,7 @@ You need Python 3.10 or later. Check with `python --version`.
 pip install -r requirements.txt
 ```
 
-This installs the Azure SDK management libraries, `openpyxl` (Excel writer), and `tqdm` (progress bars).
+This installs the Azure SDK management libraries, `openpyxl` (Excel writer), `tqdm` (progress bars), and `azure-mgmt-sqlvirtualmachine` for SQL Server VM detection.
 
 ---
 
