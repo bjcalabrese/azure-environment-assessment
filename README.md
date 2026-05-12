@@ -69,6 +69,7 @@ Open it in Excel or Google Sheets.
 | `--output` | Output `.xlsx` filename | `azure_assessment_<date>.xlsx` |
 | `--workers` | Number of subscriptions scanned in parallel | `4` |
 | `--skip-snapshots` | Skip disk snapshot enumeration | — |
+| `--anonymize` | Replace all resource names with opaque codes; saves a reversible mapping CSV alongside the workbook | — |
 | `--verbose` | Print detailed per-service logging | — |
 
 ---
@@ -245,7 +246,7 @@ The **Reader** role grants access to all `*/read` actions across every resource 
 
 | Section | What it shows |
 |---|---|
-| **KPI tiles** | Total resources, total storage (TiB), VMs running/stopped, SQL databases, storage accounts, AKS clusters, backup vaults |
+| **KPI tiles** | Total resources, total storage (TiB), VMs running/stopped, SQL databases, storage accounts, AKS clusters, current month cloud spend |
 | **Workload inventory** | Every service type with resource count and storage in GiB/TiB |
 | **Risk & Findings** | Colour-coded CRITICAL / HIGH / MEDIUM findings — public blob access, SQL with public access, storage without HTTPS-only, unattached disks, Redis with non-SSL port, VMs without backup |
 | **Azure Backup infrastructure** | Vault count and total protected items |
@@ -275,6 +276,8 @@ The **Reader** role grants access to all `*/read` actions across every resource 
 | **Redis Cache** | SKU, capacity, Redis version, TLS settings, geo-replication |
 | **Backup Vaults** | Redundancy type, protected items count |
 | **Backup Protected Items** | Vault, item name, item type, protection status, last backup time, policy name |
+| **Backup Costs** | Recovery Services Vault spend over the last 30 days per vault, with totals |
+| **Monthly Cloud Spend** | Azure spend by service category for the current month and previous month, with month-over-month change; top services also surfaced on the Summary dashboard |
 
 ---
 

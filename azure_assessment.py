@@ -1252,6 +1252,85 @@ def collect_backup(credential, sub_id, sub_name, verbose=False):
     return vault_rows, plan_rows
 
 
+def collect_cloud_spend(credential, sub_id, sub_name, verbose=False):
+    """Collect monthly Azure spend by service category — current month and previous month."""
+    rows = []
+    if _CostClient is None:
+        return rows
+    try:
+        import importlib
+        models = importlib.import_module("azure.mgmt.costmanagement.models")
+        client = _CostClient(credential)
+        scope  = f"/subscriptions/{sub_id}"
+
+        today      = datetime.datetime.now(datetime.timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        # Current month: 1st of this month → today
+        cur_start  = today.replace(day=1)
+        cur_end    = today
+        # Previous month: 1st → last day of last month
+        prev_end   = cur_start - datetime.timedelta(days=1)
+        prev_start = prev_end.replace(day=1)
+
+        def _query_spend(start, end):
+            params = models.QueryDefinition(
+                type="ActualCost",
+                timeframe="Custom",
+                time_period=models.QueryTimePeriod(from_property=start, to=end),
+                dataset=models.QueryDataset(
+                    granularity="None",
+                    aggregation={"totalCost": models.QueryAggregation(name="Cost", function="Sum")},
+                    grouping=[
+                        models.QueryGrouping(type="Dimension", name="ServiceName"),
+                        models.QueryGrouping(type="Dimension", name="ServiceFamily"),
+                    ],
+                ),
+            )
+            result = client.query.usage(scope, params)
+            col_idx  = {c.name.lower(): i for i, c in enumerate(result.columns or [])}
+            cost_i   = col_idx.get("cost", col_idx.get("pretaxcost", 0))
+            svc_i    = col_idx.get("servicename", 1)
+            fam_i    = col_idx.get("servicefamily", 2)
+            cur_i    = col_idx.get("currency", None)
+            out = {}
+            for row in (result.rows or []):
+                svc      = str(row[svc_i])  if svc_i  < len(row) else "Other"
+                fam      = str(row[fam_i])  if fam_i  < len(row) else ""
+                cost     = float(row[cost_i]) if cost_i < len(row) else 0.0
+                currency = str(row[cur_i])  if cur_i is not None and cur_i < len(row) else "USD"
+                out[svc] = (round(cost, 4), fam, currency)
+            return out
+
+        cur_spend  = _query_spend(cur_start, cur_end)
+        prev_spend = _query_spend(prev_start, prev_end)
+
+        all_services = sorted(set(cur_spend) | set(prev_spend))
+        cur_label  = cur_start.strftime("%b %Y")
+        prev_label = prev_start.strftime("%b %Y")
+
+        for svc in all_services:
+            cur_cost,  fam,  currency = cur_spend.get(svc,  (0.0, "", "USD"))
+            prev_cost, _,    _        = prev_spend.get(svc, (0.0, "", "USD"))
+            if prev_cost > 0:
+                delta_pct = round(((cur_cost - prev_cost) / prev_cost) * 100, 1)
+            else:
+                delta_pct = ""
+            rows.append({
+                "Subscription":         sub_name,
+                "Service":              svc,
+                "Service Family":       fam,
+                f"Cost ({cur_label})":  cur_cost,
+                f"Cost ({prev_label})": prev_cost,
+                "MoM Change (%)":       delta_pct,
+                "Currency":             currency,
+            })
+
+        if verbose:
+            log.info("Cloud spend %s: %d service categories", sub_name, len(rows))
+    except Exception as exc:
+        log.warning("Cloud spend %s: %s", sub_name, exc)
+    return rows
+
+
 def collect_backup_costs(credential, sub_id, sub_name, verbose=False):
     """Collect Azure Cost Management data for Recovery Services Vaults (last 30 days)."""
     rows = []
@@ -1896,6 +1975,47 @@ def build_sheet_backup_costs(wb, rows):
     return ws
 
 
+def build_sheet_cloud_spend(wb, rows):
+    ws = _new_sheet(wb, "Monthly Cloud Spend")
+    if not rows:
+        ws.cell(row=1, column=1, value="No cost data available — ensure the account has Cost Management Reader access.")
+        return ws
+
+    # Column headers are dynamic (month names vary), so derive from first row
+    fixed = ["Subscription", "Service", "Service Family"]
+    cost_cols = [k for k in rows[0] if k.startswith("Cost (")]
+    extra = ["MoM Change (%)", "Currency"]
+    headers = fixed + cost_cols + extra
+
+    r = _header_row(ws, headers)
+    for i, row in enumerate(rows):
+        vals = [row.get(h, "") for h in headers]
+        for col, v in enumerate(vals, 1):
+            c = ws.cell(row=r, column=col, value=v)
+            c.alignment = LEFT; c.border = BORDER; c.font = NORMAL
+            if i % 2 == 1: c.fill = ALT_FILL
+        # MoM change colouring — red = cost went up, green = down
+        mom_col = len(fixed) + len(cost_cols) + 1
+        mom = row.get("MoM Change (%)", "")
+        if isinstance(mom, (int, float)):
+            ws.cell(row=r, column=mom_col).fill = (RED_FILL if mom > 0 else GREEN_FILL if mom < 0 else PatternFill())
+        r += 1
+
+    # Totals row
+    ws.cell(row=r, column=1, value="TOTAL").font = BOLD
+    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=3)
+    for ci, key in enumerate(cost_cols, len(fixed) + 1):
+        total = sum(x.get(key, 0) for x in rows if isinstance(x.get(key), (int, float)))
+        c = ws.cell(row=r, column=ci, value=round(total, 2))
+        c.font = Font(bold=True, color="FFFFFF", name="Calibri", size=10)
+        c.fill = HEADER_FILL; c.border = BORDER; c.alignment = CENTER
+
+    widths = [18, 34, 20] + [16] * len(cost_cols) + [14, 10]
+    _set_col_widths(ws, widths)
+    _freeze(ws)
+    return ws
+
+
 def build_sheet_elastic_pools(wb, rows):
     ws = _new_sheet(wb, "SQL Elastic Pools")
     headers = ["Subscription","Server","Pool Name","Resource Group","Location",
@@ -1967,14 +2087,15 @@ def build_summary_sheet(wb, data, sub_names):
     ws.row_dimensions[2].height = 16
 
     # ── KPI tiles (row 4-6, columns A-H) ─────────────────────────────────────
-    vms       = data.get("vms", [])
-    disks     = data.get("disks", [])
-    snapshots = data.get("snapshots", [])
-    sql       = data.get("sql", [])
-    storage   = data.get("storage", [])
-    aks       = data.get("aks", [])
-    functions = data.get("functions", [])
-    vaults    = data.get("backup_vaults", [])
+    vms        = data.get("vms", [])
+    disks      = data.get("disks", [])
+    snapshots  = data.get("snapshots", [])
+    sql        = data.get("sql", [])
+    storage    = data.get("storage", [])
+    aks        = data.get("aks", [])
+    functions  = data.get("functions", [])
+    vaults     = data.get("backup_vaults", [])
+    cloud_spend= data.get("cloud_spend", [])
 
     total_resources = (len(vms) + len(disks) + len(snapshots) + len(sql) +
                        len(storage) + len(data.get("netapp", [])) +
@@ -1992,6 +2113,19 @@ def build_summary_sheet(wb, data, sub_names):
     stopped  = len(vms) - running
     unattach = sum(1 for d in disks if "unattached" in str(d.get("Disk State","")).lower())
 
+    # Monthly spend — sum all current-month cost columns across all spend rows
+    cur_month_spend = 0.0
+    spend_currency  = "USD"
+    if cloud_spend:
+        cur_keys = [k for k in cloud_spend[0] if k.startswith("Cost (")]
+        if cur_keys:
+            cur_month_spend = round(sum(r.get(cur_keys[0], 0) for r in cloud_spend
+                                        if isinstance(r.get(cur_keys[0]), (int, float))), 2)
+            spend_currency  = cloud_spend[0].get("Currency", "USD")
+
+    spend_label = f"MONTHLY SPEND\n({spend_currency})" if cur_month_spend else "MONTHLY SPEND\n(N/A)"
+    spend_value = f"${cur_month_spend:,.0f}" if cur_month_spend else "N/A"
+
     kpis = [
         ("TOTAL\nRESOURCES",  total_resources),
         ("TOTAL STORAGE\n(TiB)", total_tib),
@@ -2000,7 +2134,7 @@ def build_summary_sheet(wb, data, sub_names):
         ("SQL\nDatabases",   len(sql)),
         ("Storage\nAccounts",len(storage)),
         ("AKS\nClusters",    len(aks)),
-        ("Backup\nVaults",   len(vaults)),
+        (spend_label,        spend_value),
     ]
 
     ws.row_dimensions[3].height = 6
@@ -2187,6 +2321,38 @@ def build_summary_sheet(wb, data, sub_names):
         ws.row_dimensions[r2].height = 15
         r2 += 1
 
+    # Cloud Spend by Service (right column)
+    if cloud_spend:
+        r2 += 1
+        cur_keys = [k for k in cloud_spend[0] if k.startswith("Cost (")]
+        cur_key  = cur_keys[0] if cur_keys else None
+        if cur_key:
+            r2 = section_header(r2, 5, 8, f"Monthly Spend by Service  ({cur_key.replace('Cost (','').rstrip(')')})")
+            top_spend = sorted(cloud_spend, key=lambda x: x.get(cur_key, 0), reverse=True)[:10]
+            for item in top_spend:
+                svc  = item.get("Service", "")
+                cost = item.get(cur_key, 0)
+                ws.cell(row=r2, column=5, value=svc).font = NORMAL
+                ws.cell(row=r2, column=5).border = BORDER
+                ws.merge_cells(start_row=r2, start_column=5, end_row=r2, end_column=7)
+                c = ws.cell(row=r2, column=8, value=f"${cost:,.2f}")
+                c.font = BOLD; c.alignment = CENTER; c.border = BORDER
+                ws.row_dimensions[r2].height = 15
+                r2 += 1
+            # Total row
+            total_cur = sum(x.get(cur_key, 0) for x in cloud_spend
+                            if isinstance(x.get(cur_key), (int, float)))
+            ws.cell(row=r2, column=5, value="TOTAL").font = Font(bold=True, name="Calibri", size=9)
+            ws.merge_cells(start_row=r2, start_column=5, end_row=r2, end_column=7)
+            for col in range(5, 9):
+                ws.cell(row=r2, column=col).fill = HEADER_FILL
+                ws.cell(row=r2, column=col).border = BORDER
+            c = ws.cell(row=r2, column=8, value=f"${total_cur:,.2f}")
+            c.font = Font(bold=True, color="FFFFFF", name="Calibri", size=9)
+            c.alignment = CENTER
+            ws.row_dimensions[r2].height = 16
+            r2 += 1
+
     # ── Backup Sizing Summary (left column, below workload inventory) ──────────
     r += 1
     r = section_header(r, 1, 4, "Backup Sizing Summary", fill=PatternFill("solid", fgColor="375623"))
@@ -2331,6 +2497,7 @@ def build_workbook(data, output_path, sub_names, anonymizer=None):
     build_sheet_backup_vaults(wb,  data.get("backup_vaults", []))
     build_sheet_backup_items(wb,   data.get("backup_items", []))
     build_sheet_backup_costs(wb,   data.get("backup_costs", []))
+    build_sheet_cloud_spend(wb,    data.get("cloud_spend", []))
 
     wb.save(output_path)
     log.info("Saved: %s", output_path)
@@ -2381,8 +2548,9 @@ def collect_subscription(credential, sub_id, sub_name, args):
     results["backup_vaults"] = vault_rows
     results["backup_items"]  = item_rows
 
-    # Backup costs via Cost Management
-    results["backup_costs"] = collect_backup_costs(credential, sub_id, sub_name, verbose)
+    # Cost Management data
+    results["backup_costs"]  = collect_backup_costs(credential, sub_id, sub_name, verbose)
+    results["cloud_spend"]   = collect_cloud_spend(credential, sub_id, sub_name, verbose)
 
     # Cross-reference: stamp SQL Server flag and backup policy onto each VM row
     if sql_vm_names or item_rows:
