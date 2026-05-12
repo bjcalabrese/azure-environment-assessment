@@ -474,20 +474,31 @@ def collect_sql(credential, sub_id, sub_name, verbose=False):
             rg_m   = rg_from_id(mi.id)
             storage= mi.storage_size_in_gb or 0
             rows.append({
-                "Subscription":     sub_name,
-                "Type":             "SQL Managed Instance",
-                "Server / Instance":mi.name,
-                "Database Name":    "",
-                "Resource Group":   rg_m,
-                "Location":         mi.location or "",
-                "SKU":              mi.sku.name if mi.sku else "",
-                "Tier":             mi.sku.tier if mi.sku else "",
-                "Capacity":         str(mi.v_cores or ""),
-                "Max Storage (GiB)":storage,
-                "Backup Redundancy":str(mi.storage_account_type or ""),
-                "Public Access":    str(mi.public_data_endpoint_enabled or False),
-                "Encryption (TDE)": "Enabled",
-                "Availability Zone":"",
+                "Subscription":      sub_name,
+                "Type":              "SQL Managed Instance",
+                "Server / Instance": mi.name,
+                "Database Name":     "",
+                "Resource Group":    rg_m,
+                "Location":          mi.location or "",
+                "SKU":               mi.sku.name if mi.sku else "",
+                "Tier":              mi.sku.tier if mi.sku else "",
+                "Capacity":          str(mi.v_cores or ""),
+                "Max Storage (GiB)": storage,
+                "Allocated (GiB)":   None,
+                "Used (GiB)":        None,
+                "Elastic Pool":      "",
+                "PITR (Days)":       getattr(mi, "backup_storage_redundancy", None) and "" or "",
+                "LTR Weekly":        "",
+                "LTR Monthly":       "",
+                "LTR Yearly":        "",
+                "Backup Redundancy": str(mi.storage_account_type or ""),
+                "Public Access":     str(mi.public_data_endpoint_enabled or False),
+                "Encryption (TDE)":  "Enabled",
+                "Availability Zone": getattr(mi, "zone_redundant", None) and "Zone-redundant" or "",
+                "License Type":      str(getattr(mi, "license_type", "") or ""),
+                "Proxy Override":    str(getattr(mi, "proxy_override", "") or ""),
+                "Min TLS":           str(getattr(mi, "minimal_tls_version", "") or ""),
+                "Timezone":          getattr(mi, "timezone_id", "") or "",
             })
 
         if verbose:
@@ -498,34 +509,53 @@ def collect_sql(credential, sub_id, sub_name, verbose=False):
 
 
 def collect_sql_mi_databases(credential, sub_id, sub_name, verbose=False):
-    """Collect individual databases on each SQL Managed Instance."""
+    """Collect individual databases on each SQL Managed Instance, including backup retention."""
     rows = []
     if _SqlClient is None:
         return rows
     try:
         sql = _SqlClient(credential, sub_id)
         for mi in safe_list(sql.managed_instances.list()):
-            rg = rg_from_id(mi.id)
+            rg       = rg_from_id(mi.id)
             vcores   = mi.v_cores or ""
             storage  = mi.storage_size_in_gb or 0
             location = mi.location or ""
+            license_type = str(getattr(mi, "license_type", "") or "")
             try:
                 dbs = safe_list(sql.managed_databases.list_by_instance(rg, mi.name))
             except Exception:
                 continue
             for db in dbs:
+                pitr = ltr_w = ltr_m = ltr_y = ""
+                try:
+                    p = sql.managed_backup_short_term_retention_policies.get(rg, mi.name, db.name)
+                    pitr = p.retention_days or ""
+                except Exception:
+                    pass
+                try:
+                    p = sql.managed_backup_long_term_retention_policies.get(rg, mi.name, db.name)
+                    ltr_w = getattr(p, "weekly_retention",  None) or ""
+                    ltr_m = getattr(p, "monthly_retention", None) or ""
+                    ltr_y = getattr(p, "yearly_retention",  None) or ""
+                except Exception:
+                    pass
                 rows.append({
-                    "Subscription":      sub_name,
-                    "Managed Instance":  mi.name,
-                    "Database Name":     db.name,
-                    "Resource Group":    rg,
-                    "Location":          location,
-                    "Instance vCores":   vcores,
+                    "Subscription":           sub_name,
+                    "Managed Instance":       mi.name,
+                    "Database Name":          db.name,
+                    "Resource Group":         rg,
+                    "Location":               location,
+                    "Instance vCores":        vcores,
                     "Instance Storage (GiB)": storage,
-                    "DB Status":         str(db.status or ""),
-                    "Collation":         db.collation or "",
-                    "Created":           str(db.creation_date.date() if db.creation_date else ""),
-                    "Earliest Restore":  str(db.earliest_restore_point.date() if db.earliest_restore_point else ""),
+                    "License Type":           license_type,
+                    "DB Status":              str(db.status or ""),
+                    "Collation":              db.collation or "",
+                    "Created":                str(db.creation_date.date() if db.creation_date else ""),
+                    "Earliest Restore":       str(db.earliest_restore_point.date() if db.earliest_restore_point else ""),
+                    "PITR (Days)":            pitr,
+                    "LTR Weekly":             ltr_w,
+                    "LTR Monthly":            ltr_m,
+                    "LTR Yearly":             ltr_y,
                 })
         if verbose:
             log.info("SQL MI Databases %s: %d databases", sub_name, len(rows))
@@ -1252,6 +1282,134 @@ def collect_backup(credential, sub_id, sub_name, verbose=False):
     return vault_rows, plan_rows
 
 
+def collect_backup_sql_items(credential, sub_id, sub_name, verbose=False):
+    """Collect SQL workload protected items (SQLDataBase + SQLInstance) from all vaults."""
+    rows = []
+    if _RecoveryClient is None or _BackupClient is None:
+        return rows
+    try:
+        recovery  = _RecoveryClient(credential, sub_id)
+        bk_client = _BackupClient(credential, sub_id)
+        for vault in safe_list(recovery.vaults.list_by_subscription_id()):
+            rg = rg_from_id(vault.id)
+            try:
+                items = safe_list(
+                    bk_client.backup_protected_items.list(
+                        vault.name, rg,
+                        filter="backupManagementType eq 'AzureWorkload'"
+                    )
+                )
+            except Exception:
+                continue
+            for item in items:
+                props        = item.properties
+                workload_type= str(getattr(props, "workload_type", "") if props else "")
+                if workload_type.lower() not in ("sqldatabase", "sqlinstance", "sqldataguard",
+                                                  "sqlavailabilitygrouplisten", ""):
+                    if "sql" not in workload_type.lower():
+                        continue
+                policy_id   = getattr(props, "policy_id", "") if props else ""
+                policy_name = policy_id.split("/")[-1] if policy_id else ""
+                # item name format: "SQLDataBase;MSSQLSERVER;dbname" or similar
+                parts = (item.name or "").split(";")
+                db_name  = parts[-1] if len(parts) >= 2 else item.name or ""
+                srv_name = parts[1]  if len(parts) >= 3 else ""
+                rows.append({
+                    "Subscription":      sub_name,
+                    "Vault":             vault.name,
+                    "Server / Instance": srv_name,
+                    "Database":          db_name,
+                    "Resource Group":    rg,
+                    "Location":          vault.location or "",
+                    "Workload Type":     workload_type,
+                    "Protection Status": str(getattr(props, "protection_status", "") if props else ""),
+                    "Last Backup":       str(getattr(props, "last_backup_time", "") if props else ""),
+                    "Last Backup Status":str(getattr(props, "last_backup_status", "") if props else ""),
+                    "Policy Name":       policy_name,
+                })
+        if verbose:
+            log.info("Backup SQL items %s: %d items", sub_name, len(rows))
+    except Exception as exc:
+        log.warning("Backup SQL items %s: %s", sub_name, exc)
+    return rows
+
+
+def collect_backup_policies(credential, sub_id, sub_name, verbose=False):
+    """Collect backup policies (VM and SQL) from all Recovery Services Vaults."""
+    rows = []
+    if _RecoveryClient is None or _BackupClient is None:
+        return rows
+    try:
+        recovery  = _RecoveryClient(credential, sub_id)
+        bk_client = _BackupClient(credential, sub_id)
+        for vault in safe_list(recovery.vaults.list_by_subscription_id()):
+            rg = rg_from_id(vault.id)
+            try:
+                policies = safe_list(bk_client.backup_policies.list(vault.name, rg))
+            except Exception:
+                continue
+            for pol in policies:
+                props   = pol.properties
+                bm_type = str(getattr(props, "backup_management_type", "") if props else "")
+                # Schedule details
+                schedule_freq = ""
+                retention_days= ""
+                weekly_ret    = ""
+                monthly_ret   = ""
+                yearly_ret    = ""
+                try:
+                    sp = getattr(props, "schedule_policy", None)
+                    if sp:
+                        schedule_freq = str(getattr(sp, "schedule_run_frequency", "") or "")
+                except Exception:
+                    pass
+                try:
+                    rp = getattr(props, "retention_policy", None)
+                    if rp:
+                        daily = getattr(rp, "daily_schedule", None)
+                        if daily:
+                            dr = getattr(daily, "retention_duration", None)
+                            if dr:
+                                retention_days = str(getattr(dr, "count", "") or "")
+                        weekly_ret  = str(getattr(getattr(rp, "weekly_schedule",  None), "retention_times", [None])[0] or "") if getattr(rp, "weekly_schedule",  None) else ""
+                        monthly_ret = "Yes" if getattr(rp, "monthly_schedule", None) else ""
+                        yearly_ret  = "Yes" if getattr(rp, "yearly_schedule",  None) else ""
+                except Exception:
+                    pass
+                # For AzureWorkload (SQL) policies, retention lives in sub-protection policies
+                if not retention_days:
+                    try:
+                        for sp in (getattr(props, "sub_protection_policy", None) or []):
+                            rp = getattr(sp, "retention_policy", None)
+                            if rp:
+                                daily = getattr(rp, "daily_schedule", None)
+                                if daily:
+                                    dr = getattr(daily, "retention_duration", None)
+                                    if dr:
+                                        retention_days = str(getattr(dr, "count", "") or "")
+                                        break
+                    except Exception:
+                        pass
+                rows.append({
+                    "Subscription":    sub_name,
+                    "Vault":           vault.name,
+                    "Policy Name":     pol.name or "",
+                    "Resource Group":  rg,
+                    "Location":        vault.location or "",
+                    "Type":            bm_type,
+                    "Schedule":        schedule_freq,
+                    "Daily Retention": retention_days,
+                    "Weekly Retention":weekly_ret,
+                    "Monthly Enabled": monthly_ret,
+                    "Yearly Enabled":  yearly_ret,
+                })
+        if verbose:
+            log.info("Backup policies %s: %d policies", sub_name, len(rows))
+    except Exception as exc:
+        log.warning("Backup policies %s: %s", sub_name, exc)
+    return rows
+
+
 def collect_cloud_spend(credential, sub_id, sub_name, verbose=False):
     """Collect monthly Azure spend by service category — current month and previous month."""
     rows = []
@@ -1271,7 +1429,10 @@ def collect_cloud_spend(credential, sub_id, sub_name, verbose=False):
         prev_end   = cur_start - datetime.timedelta(days=1)
         prev_start = prev_end.replace(day=1)
 
-        def _query_spend(start, end):
+        def _query_spend(start, end, include_family=True):
+            grouping = [models.QueryGrouping(type="Dimension", name="ServiceName")]
+            if include_family:
+                grouping.append(models.QueryGrouping(type="Dimension", name="ServiceFamily"))
             params = models.QueryDefinition(
                 type="ActualCost",
                 timeframe="Custom",
@@ -1279,29 +1440,31 @@ def collect_cloud_spend(credential, sub_id, sub_name, verbose=False):
                 dataset=models.QueryDataset(
                     granularity="None",
                     aggregation={"totalCost": models.QueryAggregation(name="Cost", function="Sum")},
-                    grouping=[
-                        models.QueryGrouping(type="Dimension", name="ServiceName"),
-                        models.QueryGrouping(type="Dimension", name="ServiceFamily"),
-                    ],
+                    grouping=grouping,
                 ),
             )
             result = client.query.usage(scope, params)
             col_idx  = {c.name.lower(): i for i, c in enumerate(result.columns or [])}
             cost_i   = col_idx.get("cost", col_idx.get("pretaxcost", 0))
             svc_i    = col_idx.get("servicename", 1)
-            fam_i    = col_idx.get("servicefamily", 2)
+            fam_i    = col_idx.get("servicefamily", 2) if include_family else None
             cur_i    = col_idx.get("currency", None)
             out = {}
             for row in (result.rows or []):
                 svc      = str(row[svc_i])  if svc_i  < len(row) else "Other"
-                fam      = str(row[fam_i])  if fam_i  < len(row) else ""
+                fam      = (str(row[fam_i]) if fam_i is not None and fam_i < len(row) else "")
                 cost     = float(row[cost_i]) if cost_i < len(row) else 0.0
                 currency = str(row[cur_i])  if cur_i is not None and cur_i < len(row) else "USD"
                 out[svc] = (round(cost, 4), fam, currency)
             return out
 
-        cur_spend  = _query_spend(cur_start, cur_end)
-        prev_spend = _query_spend(prev_start, prev_end)
+        # Some subscription types (e.g. Visual Studio/MSDN) don't support ServiceFamily
+        try:
+            cur_spend  = _query_spend(cur_start, cur_end,   include_family=True)
+            prev_spend = _query_spend(prev_start, prev_end, include_family=True)
+        except Exception:
+            cur_spend  = _query_spend(cur_start, cur_end,   include_family=False)
+            prev_spend = _query_spend(prev_start, prev_end, include_family=False)
 
         all_services = sorted(set(cur_spend) | set(prev_spend))
         cur_label  = cur_start.strftime("%b %Y")
@@ -1640,8 +1803,9 @@ def build_sheet_sql(wb, rows):
 def build_sheet_sql_mi_databases(wb, rows):
     ws = _new_sheet(wb, "SQL MI Databases")
     headers = ["Subscription","Managed Instance","Database Name","Resource Group",
-               "Location","Instance vCores","Instance Storage (GiB)",
-               "DB Status","Collation","Created","Earliest Restore"]
+               "Location","License Type","Instance vCores","Instance Storage (GiB)",
+               "DB Status","Collation","Created","Earliest Restore",
+               "PITR (Days)","LTR Weekly","LTR Monthly","LTR Yearly"]
     r = _header_row(ws, headers)
     for i, row in enumerate(rows):
         vals = [row.get(h,"") for h in headers]
@@ -1649,16 +1813,16 @@ def build_sheet_sql_mi_databases(wb, rows):
             c = ws.cell(row=r, column=col, value=v)
             c.alignment = LEFT; c.border = BORDER; c.font = NORMAL
             if i % 2 == 1: c.fill = ALT_FILL
-        # Status colouring (col 8)
+        # Status colouring (col 9 — DB Status)
         status = str(row.get("DB Status","")).lower()
-        ws.cell(row=r, column=8).fill = (GREEN_FILL if "online" in status
+        ws.cell(row=r, column=9).fill = (GREEN_FILL if "online" in status
                                           else RED_FILL if "offline" in status or "error" in status
                                           else YELLOW_FILL if status else PatternFill())
-        # Earliest restore — red if empty (no restore point available)
+        # Earliest restore (col 12) — red if empty
         er = str(row.get("Earliest Restore",""))
-        ws.cell(row=r, column=11).fill = (RED_FILL if not er else PatternFill())
+        ws.cell(row=r, column=12).fill = (RED_FILL if not er else PatternFill())
         r += 1
-    _set_col_widths(ws, [18,26,24,20,14,14,18,14,20,14,16])
+    _set_col_widths(ws, [18,26,24,20,14,14,14,18,14,20,14,16,12,14,14,12])
     _freeze(ws)
     return ws
 
@@ -1948,6 +2112,52 @@ def build_sheet_backup_items(wb, rows):
     return ws
 
 
+def build_sheet_backup_sql_items(wb, rows):
+    ws = _new_sheet(wb, "Backup SQL Items")
+    headers = ["Subscription","Vault","Server / Instance","Database",
+               "Resource Group","Location","Workload Type",
+               "Protection Status","Last Backup","Last Backup Status","Policy Name"]
+    r = _header_row(ws, headers)
+    for i, row in enumerate(rows):
+        vals = [row.get(h,"") for h in headers]
+        for col, v in enumerate(vals, 1):
+            c = ws.cell(row=r, column=col, value=v)
+            c.alignment = LEFT; c.border = BORDER; c.font = NORMAL
+            if i % 2 == 1: c.fill = ALT_FILL
+        # Protection status (col 8) colour
+        ps = str(row.get("Protection Status","")).lower()
+        ws.cell(row=r, column=8).fill = (GREEN_FILL if "protected" in ps and "not" not in ps
+                                          else RED_FILL if "not" in ps or "error" in ps
+                                          else PatternFill())
+        # Last backup status (col 10)
+        lbs = str(row.get("Last Backup Status","")).lower()
+        ws.cell(row=r, column=10).fill = (GREEN_FILL if lbs == "completed"
+                                           else RED_FILL if "fail" in lbs or "error" in lbs
+                                           else PatternFill())
+        r += 1
+    _set_col_widths(ws, [18,22,26,26,20,14,18,16,22,18,22])
+    _freeze(ws)
+    return ws
+
+
+def build_sheet_backup_policies(wb, rows):
+    ws = _new_sheet(wb, "Backup Policies")
+    headers = ["Subscription","Vault","Policy Name","Resource Group","Location",
+               "Type","Schedule","Daily Retention","Weekly Retention",
+               "Monthly Enabled","Yearly Enabled"]
+    r = _header_row(ws, headers)
+    for i, row in enumerate(rows):
+        vals = [row.get(h,"") for h in headers]
+        for col, v in enumerate(vals, 1):
+            c = ws.cell(row=r, column=col, value=v)
+            c.alignment = LEFT; c.border = BORDER; c.font = NORMAL
+            if i % 2 == 1: c.fill = ALT_FILL
+        r += 1
+    _set_col_widths(ws, [18,22,26,20,14,20,14,14,14,14,12])
+    _freeze(ws)
+    return ws
+
+
 def build_sheet_backup_costs(wb, rows):
     ws = _new_sheet(wb, "Backup Costs")
     headers = ["Subscription","Vault Name","Resource Group","Location",
@@ -2087,15 +2297,20 @@ def build_summary_sheet(wb, data, sub_names):
     ws.row_dimensions[2].height = 16
 
     # ── KPI tiles (row 4-6, columns A-H) ─────────────────────────────────────
-    vms        = data.get("vms", [])
-    disks      = data.get("disks", [])
-    snapshots  = data.get("snapshots", [])
-    sql        = data.get("sql", [])
-    storage    = data.get("storage", [])
-    aks        = data.get("aks", [])
-    functions  = data.get("functions", [])
-    vaults     = data.get("backup_vaults", [])
-    cloud_spend= data.get("cloud_spend", [])
+    vms         = data.get("vms", [])
+    disks       = data.get("disks", [])
+    snapshots   = data.get("snapshots", [])
+    sql         = data.get("sql", [])
+    sql_mi_db   = data.get("sql_mi_db", [])
+    sql_pools   = data.get("sql_pools", [])
+    sql_vms     = data.get("sql_vms", [])
+    storage     = data.get("storage", [])
+    aks         = data.get("aks", [])
+    functions   = data.get("functions", [])
+    vaults      = data.get("backup_vaults", [])
+    backup_items= data.get("backup_items", [])
+    backup_sql  = data.get("backup_sql_items", [])
+    cloud_spend = data.get("cloud_spend", [])
 
     total_resources = (len(vms) + len(disks) + len(snapshots) + len(sql) +
                        len(storage) + len(data.get("netapp", [])) +
@@ -2112,6 +2327,18 @@ def build_summary_sheet(wb, data, sub_names):
     running  = sum(1 for v in vms if "running" in str(v.get("Power State","")).lower())
     stopped  = len(vms) - running
     unattach = sum(1 for d in disks if "unattached" in str(d.get("Disk State","")).lower())
+
+    # VM backup coverage
+    protected_vm_names = {str(i.get("Protected Item","")).lower() for i in backup_items}
+    vms_protected = sum(1 for v in vms if str(v.get("Name","")).lower() in protected_vm_names
+                        or str(v.get("Backup Protected","")).lower() == "yes")
+    if len(vms) > 0:
+        bk_pct = round(vms_protected / len(vms) * 100)
+        bk_label = f"VM BACKUP\n{bk_pct}% COVERED"
+        bk_value = f"{vms_protected}/{len(vms)}"
+    else:
+        bk_label = "VM BACKUP\nCOVERAGE"
+        bk_value = "N/A"
 
     # Monthly spend — sum all current-month cost columns across all spend rows
     cur_month_spend = 0.0
@@ -2133,11 +2360,11 @@ def build_summary_sheet(wb, data, sub_names):
         ("VMs\nStopped",     stopped),
         ("SQL\nDatabases",   len(sql)),
         ("Storage\nAccounts",len(storage)),
-        ("AKS\nClusters",    len(aks)),
+        (bk_label,           bk_value),
         (spend_label,        spend_value),
     ]
 
-    ws.row_dimensions[3].height = 6
+    ws.row_dimensions[3].height = 8
     for col, (label, value) in enumerate(kpis, 1):
         ws.merge_cells(start_row=4, start_column=col, end_row=4, end_column=col)
         ws.merge_cells(start_row=5, start_column=col, end_row=5, end_column=col)
@@ -2147,9 +2374,9 @@ def build_summary_sheet(wb, data, sub_names):
         lr = ws.cell(row=5, column=col, value=label)
         lr.fill = KPI_FILL; lr.font = KPI_LBL; lr.alignment = CENTER
         ws.cell(row=6, column=col).fill = KPI_FILL
-        ws.row_dimensions[4].height = 32
-        ws.row_dimensions[5].height = 22
-        ws.row_dimensions[6].height = 4
+    ws.row_dimensions[4].height = 38
+    ws.row_dimensions[5].height = 26
+    ws.row_dimensions[6].height = 6
 
     ws.row_dimensions[7].height = 8  # spacer
 
@@ -2188,8 +2415,11 @@ def build_summary_sheet(wb, data, sub_names):
         ("Managed Disks",           disks,                        stor_gib_for(disks,"Size (GiB)")),
         ("Disk Snapshots",          snapshots,                    stor_gib_for(snapshots,"Size (GiB)")),
         ("Azure SQL",               sql,                          0),
+        ("SQL Managed Instances",   sql_mi_db,                    stor_gib_for(sql_mi_db,"Instance Storage (GiB)")),
+        ("SQL Elastic Pools",       sql_pools,                    0),
+        ("SQL Server VMs",          sql_vms,                      0),
         ("Storage Accounts",        storage,                      stor_gib),
-        ("Azure File Shares",        data.get("file_shares",[]),   stor_gib_for(data.get("file_shares",[]),"Quota (GiB)")),
+        ("Azure File Shares",       data.get("file_shares",[]),   stor_gib_for(data.get("file_shares",[]),"Quota (GiB)")),
         ("Azure NetApp Files",      data.get("netapp",[]),        stor_gib_for(data.get("netapp",[]),"Quota (GiB)")),
         ("Cosmos DB",               data.get("cosmosdb",[]),      0),
         ("Synapse Analytics",       data.get("synapse",[]),       0),
@@ -2228,21 +2458,25 @@ def build_summary_sheet(wb, data, sub_names):
     no_file_soft_delete  = sum(1 for s in storage if s.get("File Soft Delete (days)") == ""
                                and ("Files" in s.get("Active Services","") or
                                     "Files" in s.get("Service Type","")))
+    mssql_no_backup = sum(1 for v in vms
+                          if v.get("MSSQL-INSTALLED") == "Yes"
+                          and str(v.get("Backup Protected","")).lower() != "yes")
 
     findings = [
-        ("CRITICAL", "Public Blob Access Enabled",          public_storage),
-        ("CRITICAL", "SQL with Public Network Access",      public_sql),
-        ("HIGH",     "Storage Without HTTPS-Only",          http_storage),
-        ("HIGH",     "Unattached Managed Disks",            unattached_disks),
-        ("HIGH",     "Redis with Non-SSL Port Enabled",     non_ssl_redis),
-        ("HIGH",     "Blob Storage: No Soft Delete",        no_blob_soft_delete),
-        ("HIGH",     "Azure Files: No Soft Delete",         no_file_soft_delete),
-        ("MEDIUM",   "VMs Without Backup Coverage",         vms_no_backup),
+        ("CRITICAL", "Public Blob Access Enabled",              public_storage),
+        ("CRITICAL", "SQL with Public Network Access",          public_sql),
+        ("HIGH",     "Storage Without HTTPS-Only",              http_storage),
+        ("HIGH",     "Unattached Managed Disks",                unattached_disks),
+        ("HIGH",     "Redis with Non-SSL Port Enabled",         non_ssl_redis),
+        ("HIGH",     "Blob Storage: No Soft Delete",            no_blob_soft_delete),
+        ("HIGH",     "Azure Files: No Soft Delete",             no_file_soft_delete),
+        ("HIGH",     "SQL Server VMs Without Backup Coverage",  mssql_no_backup),
+        ("MEDIUM",   "VMs Without Backup Coverage",             vms_no_backup),
     ]
 
     r2 = 8
     r2 = section_header(r2, 5, 8, "Risk & Findings")
-    r2 = mini_header(r2, ["Severity", "Finding", "Count"], 5)
+    r2 = mini_header(r2, ["Severity", "Finding", "", "Count"], 5)
 
     sev_fills = {"CRITICAL": CRIT_FILL, "HIGH": HIGH_FILL, "MEDIUM": MED_FILL}
     for severity, finding, count in findings:
@@ -2264,8 +2498,9 @@ def build_summary_sheet(wb, data, sub_names):
     r2 = section_header(r2, 5, 8, "Azure Backup Infrastructure")
     total_protected = sum(v.get("Protected Items",0) for v in vaults)
     backup_stats = [
-        ("Recovery Services Vaults", len(vaults)),
-        ("Total Protected Items",    total_protected),
+        ("Recovery Services Vaults",  len(vaults)),
+        ("VM Protected Items",        total_protected),
+        ("SQL Protected Items",       len(backup_sql)),
     ]
     for k, v in backup_stats:
         ws.cell(row=r2, column=5, value=k).font = NORMAL
@@ -2363,13 +2598,15 @@ def build_summary_sheet(wb, data, sub_names):
     disk_gib_total = stor_gib_for(disks, "Size (GiB)")
     anf_gib_total  = stor_gib_for(data.get("netapp",[]), "Quota (GiB)")
     fs_gib_total   = stor_gib_for(data.get("file_shares",[]), "Quota (GiB)")
+    mi_gib_total   = stor_gib_for(sql_mi_db, "Instance Storage (GiB)")
 
     sizing = [
-        ("Managed Disks",      disk_gib_total,  "Azure Backup for Disks / Snapshots"),
-        ("Blob Storage",       blob_gib_total,  "Azure Backup for Blobs / Versioning"),
-        ("Azure Files",        file_gib_total + fs_gib_total, "Azure Backup for Files / File Sync"),
-        ("Azure NetApp Files", anf_gib_total,   "ANF Snapshots / CRR"),
-        ("Azure SQL",          0,               "Azure Backup for SQL / Auto-backup"),
+        ("Managed Disks",          disk_gib_total,              "Azure Backup for Disks / Snapshots"),
+        ("Blob Storage",           blob_gib_total,              "Azure Backup for Blobs / Versioning"),
+        ("Azure Files",            file_gib_total + fs_gib_total, "Azure Backup for Files / File Sync"),
+        ("Azure NetApp Files",     anf_gib_total,               "ANF Snapshots / CRR"),
+        ("Azure SQL",              0,                           "Azure Backup for SQL / Auto-backup"),
+        ("SQL Managed Instances",  mi_gib_total,                "Azure Backup for SQL MI / Auto-backup"),
     ]
     grand_gib = sum(g for _, g, _ in sizing)
 
@@ -2429,8 +2666,10 @@ def build_summary_sheet(wb, data, sub_names):
          "Stale"       in str(d.get("Snapshot Coverage","")))
     )
 
-    # Column widths for summary
-    col_w = [20, 14, 14, 14, 16, 32, 8, 14]
+    # Column widths — balanced for KPI tiles (one per col) and body sections
+    # Left body: A=workload name, B=count, C=GiB, D=TiB
+    # Right body: E=severity, F+G=finding text (merged), H=count
+    col_w = [24, 11, 14, 12, 13, 24, 20, 14]
     for col, w in enumerate(col_w, 1):
         ws.column_dimensions[get_column_letter(col)].width = w
 
@@ -2494,9 +2733,11 @@ def build_workbook(data, output_path, sub_names, anonymizer=None):
     build_sheet_functions(wb,      data.get("functions", []))
     build_sheet_avd(wb,            data.get("avd", []))
     build_sheet_redis(wb,          data.get("redis", []))
-    build_sheet_backup_vaults(wb,  data.get("backup_vaults", []))
-    build_sheet_backup_items(wb,   data.get("backup_items", []))
-    build_sheet_backup_costs(wb,   data.get("backup_costs", []))
+    build_sheet_backup_vaults(wb,       data.get("backup_vaults", []))
+    build_sheet_backup_items(wb,        data.get("backup_items", []))
+    build_sheet_backup_sql_items(wb,    data.get("backup_sql_items", []))
+    build_sheet_backup_policies(wb,     data.get("backup_policies", []))
+    build_sheet_backup_costs(wb,        data.get("backup_costs", []))
     build_sheet_cloud_spend(wb,    data.get("cloud_spend", []))
 
     wb.save(output_path)
@@ -2547,6 +2788,10 @@ def collect_subscription(credential, sub_id, sub_name, args):
     vault_rows, item_rows = collect_backup(credential, sub_id, sub_name, verbose)
     results["backup_vaults"] = vault_rows
     results["backup_items"]  = item_rows
+
+    # SQL workload backup items and backup policies
+    results["backup_sql_items"]  = collect_backup_sql_items(credential, sub_id, sub_name, verbose)
+    results["backup_policies"]   = collect_backup_policies(credential, sub_id, sub_name, verbose)
 
     # Cost Management data
     results["backup_costs"]  = collect_backup_costs(credential, sub_id, sub_name, verbose)
