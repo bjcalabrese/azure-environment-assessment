@@ -30,7 +30,7 @@ OS="$(uname -s)"   # Darwin | Linux
 find_python() {
     for cmd in python3 python python3.13 python3.12 python3.11 python3.10; do
         if command -v "$cmd" &>/dev/null; then
-            ver="$($cmd --version 2>&1 | grep -oP '(?<=Python )\d+\.\d+')"
+            ver="$($cmd --version 2>&1 | sed -E 's/Python ([0-9]+\.[0-9]+).*/\1/')"
             maj="${ver%%.*}"
             min="${ver##*.}"
             if [ "$maj" -gt 3 ] 2>/dev/null || { [ "$maj" -eq 3 ] 2>/dev/null && [ "$min" -ge 10 ] 2>/dev/null; }; then
