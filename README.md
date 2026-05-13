@@ -67,7 +67,7 @@ The wizard walks you through 7 steps:
 3. `pip install -r requirements.txt` with live output
 4. Authentication — interactive login, service principal, or existing env vars
 5. Subscription selection — all, specific, or current
-6. Scan options — skip snapshots, workers, output filename, anonymize
+6. Scan options — skip snapshots, workers, output filename, anonymize, Scenario Builder export
 7. Run the assessment and open the workbook
 
 ---
@@ -105,6 +105,7 @@ Open it in Excel or Google Sheets.
 | `--workers` | Number of subscriptions scanned in parallel | `4` |
 | `--skip-snapshots` | Skip disk snapshot enumeration | — |
 | `--anonymize` | Replace all resource names with opaque codes; saves a reversible mapping CSV alongside the workbook | — |
+| `--scenario-builder` | Write a second file in Veeam Scenario Builder (CAzureWrapper) import format | — |
 | `--verbose` | Print detailed per-service logging | — |
 
 ---
@@ -173,6 +174,23 @@ python azure_assessment.py \
   --skip-snapshots \
   --workers 8 \
   --output "LargeAccount_$(date +%Y%m%d).xlsx"
+```
+
+### Anonymize output (for sharing without exposing resource names)
+
+```bash
+python azure_assessment.py --all-subscriptions --anonymize \
+  --output "Customer_$(date +%Y%m%d).xlsx"
+# Produces Customer_<date>.xlsx  +  Customer_<date>_anonymize_map.csv
+```
+
+### Veeam Scenario Builder export
+
+```bash
+python azure_assessment.py --all-subscriptions --scenario-builder \
+  --output "Customer_$(date +%Y%m%d).xlsx"
+# Produces Customer_<date>.xlsx  +  Customer_<date>_scenario_builder.xlsx
+# Import the _scenario_builder.xlsx at veeam.com/calculators/scenario/build/cloud/azure
 ```
 
 ### Targeted scans
@@ -399,5 +417,6 @@ The full source code is in this repository. There are no compiled binaries, no o
 | `setup_wizard.py` | Interactive setup wizard — detects OS, installs prerequisites, guides auth and launches the scan |
 | `Start-Assessment.ps1` | Windows launcher — installs Python via winget if missing, then runs the wizard |
 | `start-assessment.sh` | macOS / Linux launcher — installs Python via Homebrew or system package manager if missing, then runs the wizard |
+| `veeam_scenario_builder_template.xlsx` | Template used by `--scenario-builder` to produce a Veeam-compatible import file |
 | `requirements.txt` | Python dependencies |
 | `QUICKSTART.md` | Step-by-step setup guide |

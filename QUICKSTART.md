@@ -24,6 +24,11 @@ chmod +x start-assessment.sh && ./start-assessment.sh
 
 The launchers automatically install Python via `winget` (Windows), Homebrew (macOS), or your system package manager (Linux) if it isn't already present.
 
+Or if Python 3.10+ is already installed, run the wizard directly:
+```bash
+python setup_wizard.py
+```
+
 Skip to [Step 4](#step-4--open-the-workbook) after the wizard finishes.
 
 ---
@@ -126,7 +131,10 @@ Options:
   --output FILENAME                    Output .xlsx filename
   --workers N                          Parallel subscription workers, default 4
   --skip-snapshots                     Skip disk snapshot enumeration (faster)
-  --anonymize                          Replace resource names with opaque codes; saves a reversible mapping CSV
+  --anonymize                          Replace all resource names with opaque codes;
+                                       saves a reversible mapping CSV alongside the workbook
+  --scenario-builder                   Write a second file in Veeam Scenario Builder
+                                       (CAzureWrapper) import format
   --verbose                            Show detailed logging
 ```
 
@@ -254,6 +262,8 @@ The Reader role includes all `*/read` actions needed by this tool. No custom pol
 | Subscription with 1,000+ disk snapshots | `--skip-snapshots` |
 | Scanning 5+ subscriptions | `--workers 6` |
 | Both of the above | `--all-subscriptions --skip-snapshots --workers 6` |
+| Sharing results without exposing resource names | `--anonymize` |
+| Uploading to Veeam Scenario Builder | `--scenario-builder` |
 | First run / debugging | `--verbose` |
 | Sharing output with external parties | `--anonymize` |
 
