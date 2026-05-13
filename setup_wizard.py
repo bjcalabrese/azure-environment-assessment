@@ -532,72 +532,84 @@ def select_subscriptions(total):
 # ─────────────────────────────────────────────────────────────────────────────
 def select_options(total):
     step_header(6, total, "Scan options",
-                "Defaults work well for most environments — press Enter to accept.")
+                "Press Enter to accept the default shown in [brackets].")
 
     blank()
 
-    # Skip snapshots
+    # ── Performance ──────────────────────────────────────────────────────────
+    print(f"  {bold(cyan('── Performance ──────────────────────────────────────'))}")
+    blank()
+
     print(f"  {bold('Skip disk snapshots?')}")
     note("  Snapshot enumeration is slow on subscriptions with thousands of disks.")
-    note("  Recommended for large environments or when you just want a quick inventory.")
+    note("  Recommended: Yes for large environments or quick inventories.")
     skip_snap = ask_yn("  Skip snapshots", default="n")
-
     blank()
 
-    # Workers
     print(f"  {bold('Parallel workers')}")
-    note("  Number of subscriptions scanned simultaneously.")
-    note("  Increase for faster multi-subscription scans (recommended: 1 per subscription up to 8).")
+    note("  Subscriptions scanned simultaneously. Match to number of subscriptions (max 8).")
     workers_raw = ask("  Workers", default="4")
     try:
         workers = max(1, min(16, int(workers_raw)))
     except ValueError:
         workers = 4
-
     blank()
 
-    # Output filename
+    # ── Output ───────────────────────────────────────────────────────────────
+    print(f"  {bold(cyan('── Output ───────────────────────────────────────────'))}")
+    blank()
+
     print(f"  {bold('Output filename')}")
-    note("  The Excel workbook will be saved to the current directory with this name.")
+    note("  Full assessment workbook saved to the current directory.")
     date_str = datetime.datetime.now().strftime("%Y%m%d")
     default_out = f"azure_assessment_{date_str}.xlsx"
     output = ask("  Filename", default=default_out)
     if not output.endswith(".xlsx"):
         output += ".xlsx"
-
     blank()
 
-    # Anonymize
     print(f"  {bold('Anonymize resource names?')}")
-    note("  Replaces subscription names, resource groups, VM names, etc. with")
-    note("  opaque codes (SUB-0001, RG-0001, VM-0001 …).  A reversible mapping")
-    note("  CSV is saved alongside the workbook so you can decode it later.")
+    note("  Replaces all names (subscriptions, resource groups, VMs, etc.) with")
+    note("  opaque codes — e.g. SUB-0001, RG-0001, VM-0001.")
+    note("  A reversible mapping CSV is saved alongside the workbook.")
     anonymize = ask_yn("  Anonymize", default="n")
-
     blank()
 
-    # Verbose
+    print(f"  {bold('Generate Veeam Scenario Builder file?')}")
+    note("  Writes a second file in the CAzureWrapper import format for")
+    note("  veeam.com/calculators/scenario/build/cloud/azure")
+    note(f"  Output: {output.replace('.xlsx', '_scenario_builder.xlsx')}")
+    scenario_builder = ask_yn("  Scenario Builder", default="n")
+    blank()
+
+    # ── Troubleshooting ───────────────────────────────────────────────────────
+    print(f"  {bold(cyan('── Troubleshooting ──────────────────────────────────'))}")
+    blank()
+
     print(f"  {bold('Verbose logging?')}")
     note("  Prints detailed per-service log lines — useful for first runs or debugging.")
     verbose = ask_yn("  Verbose", default="n")
-
     blank()
+
+    # ── Summary ───────────────────────────────────────────────────────────────
     hr()
     blank()
-    print(bold("  Summary of chosen options:"))
+    print(bold("  Your settings:"))
     blank()
-    ok(f"Skip snapshots  :  {'Yes' if skip_snap else 'No'}")
-    ok(f"Workers         :  {workers}")
-    ok(f"Output file     :  {output}")
-    ok(f"Anonymize       :  {'Yes' if anonymize else 'No'}")
-    ok(f"Verbose logging :  {'Yes' if verbose else 'No'}")
+    ok(f"Skip snapshots     :  {'Yes' if skip_snap else 'No'}")
+    ok(f"Workers            :  {workers}")
+    ok(f"Output file        :  {output}")
+    ok(f"Anonymize          :  {'Yes' if anonymize else 'No'}")
+    ok(f"Scenario Builder   :  {'Yes  →  ' + output.replace('.xlsx', '_scenario_builder.xlsx') if scenario_builder else 'No'}")
+    ok(f"Verbose logging    :  {'Yes' if verbose else 'No'}")
 
     return {
-        "skip_snapshots": skip_snap,
-        "workers": workers,
-        "output": output,
-        "anonymize": anonymize,
-        "verbose": verbose,
+        "skip_snapshots":   skip_snap,
+        "workers":          workers,
+        "output":           output,
+        "anonymize":        anonymize,
+        "scenario_builder": scenario_builder,
+        "verbose":          verbose,
     }
 
 
@@ -630,6 +642,8 @@ def run_assessment(sub_ids, all_subs, opts, total):
     parts.append(f'--output "{opts["output"]}"')
     if opts["anonymize"]:
         parts.append("--anonymize")
+    if opts.get("scenario_builder"):
+        parts.append("--scenario-builder")
     if opts["verbose"]:
         parts.append("--verbose")
 
@@ -717,7 +731,7 @@ def main():
 {cyan('Step 3')}  Install Python package dependencies from requirements.txt
 {cyan('Step 4')}  Set up Azure authentication (interactive, service principal, or env vars)
 {cyan('Step 5')}  Choose which subscriptions to scan
-{cyan('Step 6')}  Configure scan options (skip snapshots, workers, output name, anonymize)
+{cyan('Step 6')}  Configure scan options (skip snapshots, workers, output name, anonymize, scenario builder)
 {cyan('Step 7')}  Run the assessment and open the Excel workbook
 """)
 
