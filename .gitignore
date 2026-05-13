@@ -1,5 +1,6 @@
 *.xlsx
 !veeam_scenario_builder_template.xlsx
+*_mapping.csv
 *.pyc
 __pycache__/
 .env
