@@ -2704,6 +2704,134 @@ def _add_snapshot_coverage(data):
                 disk["Snapshot Coverage"] = f"Stale ({newest}d)"
 
 
+def build_scenario_builder(data, output_path):
+    """
+    Write a Veeam Scenario Builder import file (CAzureWrapper table format).
+
+    Loads the bundled template (veeam_scenario_builder_template.xlsx) to
+    preserve the exact table structure, data validations, column widths, and
+    table style that Scenario Builder expects, then fills in one row per
+    workload type sized from the collected assessment data.
+
+    Default change rates / compression are conservative starting points the
+    user can tune inside the Scenario Builder UI.
+    """
+    import zipfile, io as _io, os as _os2, re as _re
+
+    def _gib_sum(rows, key):
+        return sum(r.get(key, 0) or 0 for r in rows if isinstance(r.get(key), (int, float)))
+
+    def _tib(gib):
+        return round(gib / 1024, 4) if gib else 0
+
+    # ── Compute per-workload totals ───────────────────────────────────────────
+    vms         = data.get("vms", [])
+    disks       = data.get("disks", [])
+    sql         = data.get("sql", [])
+    sql_mi      = data.get("sql_mi_db", [])
+    sql_pools   = data.get("sql_pools", [])
+    storage     = data.get("storage", [])
+    file_shares = data.get("file_shares", [])
+    netapp      = data.get("netapp", [])
+    cosmosdb    = data.get("cosmosdb", [])
+    synapse     = data.get("synapse", [])
+
+    # VM storage: prefer disk inventory (more accurate), fall back to VM rows
+    vm_gib = _gib_sum(disks, "Size (GiB)")
+    if not vm_gib:
+        vm_gib = _gib_sum(vms, "Total Storage (GiB)")
+
+    sql_gib      = _gib_sum(sql,       "Allocated (GiB)") or _gib_sum(sql,      "Used (GiB)")
+    sql_mi_gib   = _gib_sum(sql_mi,    "Storage (GiB)")
+    sql_pool_gib = _gib_sum(sql_pools, "Max Storage (GiB)") or _gib_sum(sql_pools, "Allocated (GiB)")
+
+    blob_gib    = _gib_sum(storage,     "Blob Size (GiB)") or _gib_sum(storage, "Total Size (GiB)")
+    file_sa_gib = _gib_sum(storage,     "File Size (GiB)")
+    file_sh_gib = _gib_sum(file_shares, "Used Size (GiB)")
+    anf_gib     = _gib_sum(netapp,      "Used Size (GiB)") or _gib_sum(netapp, "Quota (GiB)")
+    cosmos_gib  = _gib_sum(cosmosdb,    "Data Size (GiB)") + _gib_sum(cosmosdb, "Index Size (GiB)")
+    synapse_gib = _gib_sum(synapse,     "Used Storage (GiB)")
+
+    # ── Build workload rows ───────────────────────────────────────────────────
+    # Columns: Workload name | Instance count | VM data (TB) | VM chg% |
+    #          DB data (TB)  | DB chg%        | File data (TB)| File chg% |
+    #          Compress%     | Growth%
+    #
+    # Change rate defaults:  VMs 5% | Databases 10% | Files/blob 3%
+    # Compression: 30%  |  Growth: 10% annual
+
+    rows = []
+    if vms or disks:
+        rows.append(("Virtual Machines",        len(vms),         _tib(vm_gib),       5,  0, 0,               0, 0, 30, 10))
+    if sql:
+        rows.append(("Azure SQL Databases",     len(sql),         0, 0, _tib(sql_gib),     10,               0, 0, 30, 10))
+    if sql_mi:
+        rows.append(("SQL Managed Instances",   len(sql_mi),      0, 0, _tib(sql_mi_gib),  10,               0, 0, 30, 10))
+    if sql_pools:
+        rows.append(("SQL Elastic Pools",       len(sql_pools),   0, 0, _tib(sql_pool_gib),10,               0, 0, 30, 10))
+    if blob_gib:
+        rows.append(("Azure Blob Storage",      len(storage),     0, 0,               0, 0, _tib(blob_gib),   3, 30, 10))
+    if file_sa_gib:
+        rows.append(("Azure Files (Storage)",   len(storage),     0, 0,               0, 0, _tib(file_sa_gib), 3, 30, 10))
+    if file_shares:
+        rows.append(("Azure File Shares",       len(file_shares), 0, 0,               0, 0, _tib(file_sh_gib), 3, 30, 10))
+    if netapp:
+        rows.append(("Azure NetApp Files",      len(netapp),      0, 0,               0, 0, _tib(anf_gib),    3, 30, 10))
+    if cosmosdb:
+        rows.append(("Azure Cosmos DB",         len(cosmosdb),    0, 0, _tib(cosmos_gib),  5,               0, 0, 30, 10))
+    if synapse:
+        rows.append(("Azure Synapse Analytics", len(synapse),     0, 0, _tib(synapse_gib), 10,               0, 0, 30, 10))
+
+    # ── Load template (preserves table structure, validations, style) ─────────
+    template_path = _os2.path.join(_os2.path.dirname(_os2.path.abspath(__file__)),
+                                   "veeam_scenario_builder_template.xlsx")
+    if not _os2.path.exists(template_path):
+        raise FileNotFoundError(
+            f"Veeam Scenario Builder template not found: {template_path}\n"
+            "Ensure veeam_scenario_builder_template.xlsx is in the same folder as azure_assessment.py"
+        )
+
+    with open(template_path, "rb") as f:
+        tmpl_bytes = f.read()
+
+    wb = openpyxl.load_workbook(_io.BytesIO(tmpl_bytes))
+    ws = wb["Azure"]
+
+    # Clear existing data rows (rows 2 → 51; row 52 is the totals row)
+    for row_idx in range(2, 52):
+        for col_idx in range(1, 11):
+            ws.cell(row=row_idx, column=col_idx).value = None
+
+    # Write our workload rows
+    for r_idx, row in enumerate(rows, start=2):
+        for c_idx, val in enumerate(row, start=1):
+            ws.cell(row=r_idx, column=c_idx).value = val
+
+    # Save to a buffer first, then patch app.xml back to the template's version.
+    # openpyxl stamps its own Application string; the Veeam Scenario Builder
+    # web validator rejects anything that isn't "Microsoft Excel".
+    buf = _io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    # Extract the original app.xml from the template
+    with zipfile.ZipFile(_io.BytesIO(tmpl_bytes)) as zt:
+        orig_app_xml = zt.read("docProps/app.xml")
+
+    # Rewrite the zip, swapping in the original app.xml
+    buf.seek(0)
+    out_buf = _io.BytesIO()
+    with zipfile.ZipFile(buf, "r") as zin, zipfile.ZipFile(out_buf, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            if item.filename == "docProps/app.xml":
+                zout.writestr(item, orig_app_xml)
+            else:
+                zout.writestr(item, zin.read(item.filename))
+
+    with open(output_path, "wb") as f:
+        f.write(out_buf.getvalue())
+
+
 def build_workbook(data, output_path, sub_names, anonymizer=None):
     wb = openpyxl.Workbook()
     wb.remove(wb.active)  # remove default sheet
@@ -2863,6 +2991,10 @@ def parse_args():
         "--anonymize", action="store_true",
         help="Replace resource names with opaque codes; saves a reversible mapping CSV alongside the workbook",
     )
+    p.add_argument(
+        "--scenario-builder", action="store_true",
+        help="Also write a Veeam Scenario Builder import file (CAzureWrapper format) alongside the main workbook",
+    )
     return p.parse_args()
 
 
@@ -2968,6 +3100,12 @@ def main():
         mapping_path = output.replace(".xlsx", "_mapping.csv")
         anonymizer.save(mapping_path)
         print(f"Anonymization mapping : {mapping_path}  (keep this file private)")
+
+    if getattr(args, "scenario_builder", False):
+        sb_path = output.replace(".xlsx", "_scenario_builder.xlsx")
+        print(f"Building Scenario Builder file: {sb_path}")
+        build_scenario_builder(dict(all_data), sb_path)
+        print(f"Scenario Builder file : {sb_path}")
 
     # Print summary
     print("\n── Results ───────────────────────────────────────")
