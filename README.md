@@ -41,11 +41,11 @@ If you can run `az account show` and see your subscription, you're ready.
 
 Use the launcher for your OS — it installs Python automatically if it isn't present, then hands off to the interactive wizard. No prerequisites needed to start.
 
-**Windows** (PowerShell — right-click → Run with PowerShell, or):
-```powershell
-.\Start-Assessment.ps1
+**Windows** (recommended — double-click or run from any terminal):
+```cmd
+Start-Assessment.bat
 ```
-If your execution policy blocks scripts, run once with:
+The `.bat` file bypasses PowerShell execution policy automatically. If you prefer to run the `.ps1` directly:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\Start-Assessment.ps1
 ```
@@ -415,7 +415,8 @@ The full source code is in this repository. There are no compiled binaries, no o
 |---|---|
 | `azure_assessment.py` | The assessment script |
 | `setup_wizard.py` | Interactive setup wizard — detects OS, installs prerequisites, guides auth and launches the scan |
-| `Start-Assessment.ps1` | Windows launcher — installs Python via winget if missing, then runs the wizard |
+| `Start-Assessment.bat` | Windows launcher — run this (bypasses PowerShell execution policy automatically) |
+| `Start-Assessment.ps1` | Windows PowerShell script called by the `.bat` file — installs Python if missing, then runs the wizard |
 | `start-assessment.sh` | macOS / Linux launcher — installs Python via Homebrew or system package manager if missing, then runs the wizard |
 | `veeam_scenario_builder_template.xlsx` | Template used by `--scenario-builder` to produce a Veeam-compatible import file |
 | `requirements.txt` | Python dependencies |

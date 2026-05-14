@@ -4,14 +4,11 @@
 
 Use the launcher for your OS. It installs Python automatically if you don't have it, then walks you through everything interactively.
 
-**Windows** — open PowerShell in the project folder and run:
-```powershell
-.\Start-Assessment.ps1
+**Windows** — double-click `Start-Assessment.bat` or run from any terminal:
+```cmd
+Start-Assessment.bat
 ```
-If your execution policy blocks scripts, use:
-```powershell
-powershell -ExecutionPolicy Bypass -File .\Start-Assessment.ps1
-```
+This bypasses PowerShell execution policy automatically. No extra flags needed.
 
 **macOS / Linux** — open Terminal in the project folder and run:
 ```bash
