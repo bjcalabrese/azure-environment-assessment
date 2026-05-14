@@ -3070,6 +3070,15 @@ def main():
         format="%(levelname)s  %(message)s",
     )
 
+    # Ensure az CLI is findable regardless of which Python interpreter launched us.
+    # Homebrew and some conda setups don't add /opt/homebrew/bin to the subprocess PATH.
+    _extra_paths = ["/opt/homebrew/bin", "/usr/local/bin", "/home/linuxbrew/.linuxbrew/bin"]
+    _env_path = _os.environ.get("PATH", "")
+    for _p in _extra_paths:
+        if _p not in _env_path:
+            _os.environ["PATH"] = _p + _os.pathsep + _env_path
+            _env_path = _os.environ["PATH"]
+
     # Output filename
     date_str   = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d")
     raw_output = args.output or f"azure_assessment_{date_str}.xlsx"

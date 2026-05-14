@@ -169,10 +169,11 @@ Option 2 — Download installer:
   Tick "Add Python to PATH" during install.
 """)
     elif OS == "Darwin":
+        path_cmd = 'echo \'export PATH="/opt/homebrew/bin:$PATH"\' >> ~/.zshrc'
         indent(f"""
 Option 1 — Homebrew (recommended):
   {cyan('brew install python@3.12')}
-  {cyan('echo \'export PATH="/opt/homebrew/bin:$PATH"\' >> ~/.zshrc')}
+  {cyan(path_cmd)}
   {cyan('source ~/.zshrc')}
 
 Option 2 — Download installer:
@@ -201,6 +202,13 @@ Arch Linux:
 def check_az_cli(total):
     step_header(2, total, "Azure CLI",
                 "The Azure CLI handles authentication and subscription discovery.")
+
+    # Augment PATH with common Homebrew locations so az is found even when
+    # the shell doesn't source ~/.zshrc (e.g. when launched via a launcher script)
+    extra = ["/opt/homebrew/bin", "/usr/local/bin", "/home/linuxbrew/.linuxbrew/bin"]
+    for p in extra:
+        if p not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = p + os.pathsep + os.environ.get("PATH", "")
 
     rc, out, _ = run_cmd("az --version")
     if rc == 0:
@@ -303,6 +311,16 @@ def install_packages(total):
     hr()
     blank()
 
+    if rc != 0:
+        # PEP 668: Homebrew/system Python blocks pip — retry with --break-system-packages
+        rc2, err2, _ = run_cmd(
+            f'"{sys.executable}" -m pip install -r "{req}" --upgrade --break-system-packages 2>&1',
+            capture=True,
+        )
+        if rc2 == 0:
+            rc = 0
+            ok("Packages installed with --break-system-packages (PEP 668 environment)")
+
     if rc == 0:
         ok("All packages installed successfully")
     else:
@@ -384,9 +402,9 @@ gives it read-only access to everything the assessment needs.
 
 {bold('The customer runs this once to create one:')}
 
-  {cyan('az ad sp create-for-rbac \\')}
-  {cyan('  --name "AzureAssessmentReadOnly" \\')}
-  {cyan('  --role "Reader" \\')}
+  {cyan('az ad sp create-for-rbac')}
+  {cyan('  --name "AzureAssessmentReadOnly"')}
+  {cyan('  --role "Reader"')}
   {cyan('  --scopes /subscriptions/<their-subscription-id>')}
 
 The output looks like:
@@ -398,9 +416,9 @@ The output looks like:
 
 For multiple subscriptions, assign Reader at the management group instead:
 
-  {cyan('az role assignment create \\')}
-  {cyan('  --assignee <appId> \\')}
-  {cyan('  --role "Reader" \\')}
+  {cyan('az role assignment create')}
+  {cyan('  --assignee <appId>')}
+  {cyan('  --role "Reader"')}
   {cyan('  --scope /providers/Microsoft.Management/managementGroups/<mg-id>')}
 """)
 
