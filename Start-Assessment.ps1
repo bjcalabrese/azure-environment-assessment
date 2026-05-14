@@ -55,14 +55,24 @@ function Install-PythonWinget {
     }
 }
 
-# ── install python via Microsoft Store ────────────────────────────────────────
-function Install-PythonStore {
-    Write-Warn "Attempting to open Python in the Microsoft Store..."
-    Start-Process "ms-windows-store://pdp/?ProductId=9NRWMJLIVE28"
-    Write-Host ""
-    Write-Host "  The Microsoft Store is opening. Install Python 3.12, then re-run this script." -ForegroundColor Yellow
-    Write-Host ""
-    return $false
+# ── install python via direct MSI download (works on Windows Server) ──────────
+function Install-PythonMsi {
+    Write-Step "Downloading Python 3.12 installer from python.org..."
+    $msi = "$env:TEMP\python-3.12-amd64.exe"
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri "https://www.python.org/ftp/python/3.12.9/python-3.12.9-amd64.exe" `
+            -OutFile $msi -UseBasicParsing
+        Write-Step "Installing Python 3.12 (silent)..."
+        Start-Process $msi -ArgumentList "/quiet InstallAllUsers=1 PrependPath=1 Include_test=0" -Wait
+        # Refresh PATH so python is visible in this session
+        $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH","Machine") + ";" +
+                    [System.Environment]::GetEnvironmentVariable("PATH","User")
+        return $true
+    } catch {
+        Write-Warn "MSI download failed: $_"
+        return $false
+    }
 }
 
 # ── manual install fallback ───────────────────────────────────────────────────
@@ -98,12 +108,14 @@ if ($null -eq $PYTHON) {
         }
     }
 
-    # winget failed or not available — try Microsoft Store
+    # winget failed or not available — download MSI directly (works on Windows Server)
     if ($null -eq $PYTHON) {
-        $choice = Read-Host "  Open Python in the Microsoft Store to install? [Y/n]"
+        $choice = Read-Host "  Download and install Python 3.12 from python.org? [Y/n]"
         if ($choice -eq "" -or $choice -match "^[Yy]") {
-            Install-PythonStore
-            exit 0
+            $installed = Install-PythonMsi
+            if ($installed) {
+                $PYTHON = Find-Python
+            }
         }
     }
 
