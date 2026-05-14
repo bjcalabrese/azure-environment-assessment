@@ -1791,9 +1791,10 @@ def build_sheet_sql(wb, rows):
         ws.cell(row=r, column=19).fill = (RED_FILL if "enabled" in pa or "true" in pa
                                            else GREEN_FILL if "disabled" in pa or "false" in pa
                                            else PatternFill())
-        # PITR days (col 14) — red if empty (no short-term backup configured)
-        pitr = row.get("PITR (Days)","")
-        ws.cell(row=r, column=14).fill = (RED_FILL if pitr == "" else GREEN_FILL)
+        # PITR days (col 14) — only applicable for Azure SQL Database rows
+        if str(row.get("Type","")).strip() == "Azure SQL Database":
+            pitr = row.get("PITR (Days)","")
+            ws.cell(row=r, column=14).fill = (RED_FILL if pitr == "" else GREEN_FILL)
         r += 1
     _set_col_widths(ws, [18,20,24,20,20,14,14,12,10,14,13,12,18,12,12,12,12,16,14,14,14])
     _freeze(ws)
@@ -2238,6 +2239,7 @@ def build_sheet_elastic_pools(wb, rows):
             c = ws.cell(row=r, column=col, value=v)
             c.alignment = LEFT; c.border = BORDER; c.font = NORMAL
             if i % 2 == 1: c.fill = ALT_FILL
+        r += 1
     # Totals row
     if rows:
         r2 = len(rows) + 2
@@ -2408,6 +2410,16 @@ def build_summary_sheet(wb, data, sub_names):
     def stor_gib_for(rows_, key="Size (GiB)"):
         return round(sum(x.get(key,0) for x in rows_ if isinstance(x.get(key),(int,float))), 2)
 
+    def mi_storage_gib(rows_):
+        # Instance Storage is repeated for every DB row on the same MI — sum once per instance
+        seen = {}
+        for x in rows_:
+            inst = x.get("Managed Instance","")
+            val  = x.get("Instance Storage (GiB)", 0)
+            if inst and isinstance(val, (int, float)) and inst not in seen:
+                seen[inst] = val
+        return round(sum(seen.values()), 2)
+
     def _tib(g): return round(g / 1024, 4)
 
     workloads = [
@@ -2415,7 +2427,7 @@ def build_summary_sheet(wb, data, sub_names):
         ("Managed Disks",           disks,                        stor_gib_for(disks,"Size (GiB)")),
         ("Disk Snapshots",          snapshots,                    stor_gib_for(snapshots,"Size (GiB)")),
         ("Azure SQL",               sql,                          0),
-        ("SQL Managed Instances",   sql_mi_db,                    stor_gib_for(sql_mi_db,"Instance Storage (GiB)")),
+        ("SQL Managed Instances",   sql_mi_db,                    mi_storage_gib(sql_mi_db)),
         ("SQL Elastic Pools",       sql_pools,                    0),
         ("SQL Server VMs",          sql_vms,                      0),
         ("Storage Accounts",        storage,                      stor_gib),
@@ -2598,7 +2610,7 @@ def build_summary_sheet(wb, data, sub_names):
     disk_gib_total = stor_gib_for(disks, "Size (GiB)")
     anf_gib_total  = stor_gib_for(data.get("netapp",[]), "Quota (GiB)")
     fs_gib_total   = stor_gib_for(data.get("file_shares",[]), "Quota (GiB)")
-    mi_gib_total   = stor_gib_for(sql_mi_db, "Instance Storage (GiB)")
+    mi_gib_total   = mi_storage_gib(sql_mi_db)
 
     sizing = [
         ("Managed Disks",          disk_gib_total,              "Azure Backup for Disks / Snapshots"),
@@ -2721,6 +2733,16 @@ def build_scenario_builder(data, output_path):
     def _gib_sum(rows, key):
         return sum(r.get(key, 0) or 0 for r in rows if isinstance(r.get(key), (int, float)))
 
+    def _mi_gib(rows):
+        # Instance Storage is repeated per-DB row — sum once per managed instance
+        seen = {}
+        for r in rows:
+            inst = r.get("Managed Instance", "")
+            val  = r.get("Instance Storage (GiB)", 0)
+            if inst and isinstance(val, (int, float)) and inst not in seen:
+                seen[inst] = val
+        return sum(seen.values())
+
     def _tib(gib):
         return round(gib / 1024, 4) if gib else 0
 
@@ -2742,15 +2764,15 @@ def build_scenario_builder(data, output_path):
         vm_gib = _gib_sum(vms, "Total Storage (GiB)")
 
     sql_gib      = _gib_sum(sql,       "Allocated (GiB)") or _gib_sum(sql,      "Used (GiB)")
-    sql_mi_gib   = _gib_sum(sql_mi,    "Storage (GiB)")
+    sql_mi_gib   = _mi_gib(sql_mi)
     sql_pool_gib = _gib_sum(sql_pools, "Max Storage (GiB)") or _gib_sum(sql_pools, "Allocated (GiB)")
 
     blob_gib    = _gib_sum(storage,     "Blob Size (GiB)") or _gib_sum(storage, "Total Size (GiB)")
     file_sa_gib = _gib_sum(storage,     "File Size (GiB)")
     file_sh_gib = _gib_sum(file_shares, "Used Size (GiB)")
     anf_gib     = _gib_sum(netapp,      "Used Size (GiB)") or _gib_sum(netapp, "Quota (GiB)")
-    cosmos_gib  = _gib_sum(cosmosdb,    "Data Size (GiB)") + _gib_sum(cosmosdb, "Index Size (GiB)")
-    synapse_gib = _gib_sum(synapse,     "Used Storage (GiB)")
+    cosmos_gib  = _gib_sum(cosmosdb,    "Data (GiB)") + _gib_sum(cosmosdb, "Index (GiB)")
+    synapse_gib = _gib_sum(synapse,     "Used (GiB)")
 
     # ── Build workload rows ───────────────────────────────────────────────────
     # Columns: Workload name | Instance count | VM data (TB) | VM chg% |

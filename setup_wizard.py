@@ -278,13 +278,20 @@ def install_packages(total):
         fail("Make sure you are running this wizard from the assessment folder.")
         sys.exit(1)
 
-    # Quick check — if core packages already present, offer to skip
+    # Quick check — validate all required packages before offering to skip
     rc, _, _ = run_cmd(
-        f'"{sys.executable}" -c "import openpyxl, tqdm, azure.identity, azure.mgmt.compute"',
+        f'"{sys.executable}" -c "'
+        "import openpyxl, tqdm, azure.identity, azure.mgmt.compute, "
+        "azure.mgmt.storage, azure.mgmt.sql, azure.mgmt.containerservice, "
+        "azure.mgmt.web, azure.mgmt.cosmosdb, azure.mgmt.recoveryservices, "
+        "azure.mgmt.recoveryservicesbackup, azure.mgmt.redis, azure.mgmt.netapp, "
+        "azure.mgmt.desktopvirtualization, azure.mgmt.synapse, "
+        "azure.mgmt.containerinstance, azure.mgmt.monitor, "
+        'azure.mgmt.sqlvirtualmachine, azure.mgmt.costmanagement"',
         capture=True,
     )
     if rc == 0:
-        ok("Core packages already installed")
+        ok("All required packages already installed")
         if not ask_yn("Re-install / upgrade packages anyway?", default="n"):
             return
 
@@ -626,28 +633,30 @@ def run_assessment(sub_ids, all_subs, opts, total):
         fail("Make sure this wizard is in the same folder as the assessment script.")
         sys.exit(1)
 
-    # Build command
-    py = f'"{sys.executable}"'
-    sc = f'"{script}"'
-    parts = [py, sc]
+    # Build arg list — never shell=True so user-supplied filenames can't inject commands
+    argv = [sys.executable, script]
 
     if all_subs:
-        parts.append("--all-subscriptions")
+        argv.append("--all-subscriptions")
     elif sub_ids:
-        parts.append("--subscription " + " ".join(sub_ids))
+        argv += ["--subscription"] + list(sub_ids)
 
     if opts["skip_snapshots"]:
-        parts.append("--skip-snapshots")
-    parts.append(f"--workers {opts['workers']}")
-    parts.append(f'--output "{opts["output"]}"')
+        argv.append("--skip-snapshots")
+    argv += ["--workers", str(opts["workers"])]
+    argv += ["--output", opts["output"]]
     if opts["anonymize"]:
-        parts.append("--anonymize")
+        argv.append("--anonymize")
     if opts.get("scenario_builder"):
-        parts.append("--scenario-builder")
+        argv.append("--scenario-builder")
     if opts["verbose"]:
-        parts.append("--verbose")
+        argv.append("--verbose")
 
-    cmd = " ".join(parts)
+    # Display string for the user (cosmetic only — not passed to shell)
+    cmd = " ".join(
+        f'"{a}"' if " " in a else a
+        for a in argv
+    )
 
     blank()
     print(bold("  Command that will be run:"))
@@ -669,7 +678,7 @@ def run_assessment(sub_ids, all_subs, opts, total):
     blank()
     hr("─")
     blank()
-    rc = run_live(cmd)
+    rc = subprocess.run(argv).returncode
     blank()
     hr("─")
     blank()

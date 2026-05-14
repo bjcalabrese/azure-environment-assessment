@@ -181,7 +181,7 @@ python azure_assessment.py \
 ```bash
 python azure_assessment.py --all-subscriptions --anonymize \
   --output "Customer_$(date +%Y%m%d).xlsx"
-# Produces Customer_<date>.xlsx  +  Customer_<date>_anonymize_map.csv
+# Produces Customer_<date>.xlsx  +  Customer_<date>_mapping.csv
 ```
 
 ### Veeam Scenario Builder export
