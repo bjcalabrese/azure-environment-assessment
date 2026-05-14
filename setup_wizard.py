@@ -281,7 +281,7 @@ def install_packages(total):
     # Quick check — validate all required packages before offering to skip
     rc, _, _ = run_cmd(
         f'"{sys.executable}" -c "'
-        "import openpyxl, tqdm, azure.identity, azure.mgmt.compute, "
+        "import openpyxl, tqdm, azure.identity, azure.mgmt.resource, azure.mgmt.compute, "
         "azure.mgmt.storage, azure.mgmt.sql, azure.mgmt.containerservice, "
         "azure.mgmt.web, azure.mgmt.cosmosdb, azure.mgmt.recoveryservices, "
         "azure.mgmt.recoveryservicesbackup, azure.mgmt.redis, azure.mgmt.netapp, "
