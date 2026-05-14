@@ -37,6 +37,41 @@ If you can run `az account show` and see your subscription, you're ready.
 
 ---
 
+## Setup wizard (recommended for first-time use)
+
+Use the launcher for your OS — it installs Python automatically if it isn't present, then hands off to the interactive wizard. No prerequisites needed to start.
+
+**Windows** (PowerShell — right-click → Run with PowerShell, or):
+```powershell
+.\Start-Assessment.ps1
+```
+If your execution policy blocks scripts, run once with:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Start-Assessment.ps1
+```
+
+**macOS / Linux** (Terminal):
+```bash
+./start-assessment.sh
+```
+If the script isn't executable yet:
+```bash
+chmod +x start-assessment.sh && ./start-assessment.sh
+```
+
+The launcher checks for Python 3.10+. If it isn't installed it uses `winget` (Windows), Homebrew (macOS), or your system package manager (`apt`, `dnf`, `yum`, `pacman`) to install it automatically, then launches the wizard.
+
+The wizard walks you through 7 steps:
+1. Python version check with OS-specific upgrade instructions
+2. Azure CLI check with install instructions per OS
+3. `pip install -r requirements.txt` with live output
+4. Authentication — interactive login, service principal, or existing env vars
+5. Subscription selection — all, specific, or current
+6. Scan options — skip snapshots, workers, output filename, anonymize, Scenario Builder export
+7. Run the assessment and open the workbook
+
+---
+
 ## Quickstart
 
 ```bash
@@ -69,6 +104,8 @@ Open it in Excel or Google Sheets.
 | `--output` | Output `.xlsx` filename | `azure_assessment_<date>.xlsx` |
 | `--workers` | Number of subscriptions scanned in parallel | `4` |
 | `--skip-snapshots` | Skip disk snapshot enumeration | — |
+| `--anonymize` | Replace all resource names with opaque codes; saves a reversible mapping CSV alongside the workbook | — |
+| `--scenario-builder` | Write a second file in Veeam Scenario Builder (CAzureWrapper) import format | — |
 | `--verbose` | Print detailed per-service logging | — |
 
 ---
@@ -137,6 +174,23 @@ python azure_assessment.py \
   --skip-snapshots \
   --workers 8 \
   --output "LargeAccount_$(date +%Y%m%d).xlsx"
+```
+
+### Anonymize output (for sharing without exposing resource names)
+
+```bash
+python azure_assessment.py --all-subscriptions --anonymize \
+  --output "Customer_$(date +%Y%m%d).xlsx"
+# Produces Customer_<date>.xlsx  +  Customer_<date>_mapping.csv
+```
+
+### Veeam Scenario Builder export
+
+```bash
+python azure_assessment.py --all-subscriptions --scenario-builder \
+  --output "Customer_$(date +%Y%m%d).xlsx"
+# Produces Customer_<date>.xlsx  +  Customer_<date>_scenario_builder.xlsx
+# Import the _scenario_builder.xlsx at veeam.com/calculators/scenario/build/cloud/azure
 ```
 
 ### Targeted scans
@@ -245,32 +299,43 @@ The **Reader** role grants access to all `*/read` actions across every resource 
 
 | Section | What it shows |
 |---|---|
-| **KPI tiles** | Total resources, total storage (TiB), VMs running/stopped, SQL databases, storage accounts, AKS clusters, backup vaults |
-| **Workload inventory** | Every service type with resource count and storage in GiB/TiB |
-| **Risk & Findings** | Colour-coded CRITICAL / HIGH / MEDIUM findings — public blob access, SQL with public access, storage without HTTPS-only, unattached disks, Redis with non-SSL port, VMs without backup |
-| **Azure Backup infrastructure** | Vault count and total protected items |
+| **KPI tiles** | Total resources, total storage (TiB), VMs running/stopped, SQL databases, storage accounts, VM backup coverage (protected/total %), current month cloud spend |
+| **Workload inventory** | Every service type with resource count and storage in GiB/TiB — including SQL MI, Elastic Pools, and SQL Server VMs |
+| **Risk & Findings** | Colour-coded CRITICAL / HIGH / MEDIUM findings — public blob access, SQL with public access, storage without HTTPS-only, unattached disks, Redis with non-SSL port, SQL Server VMs without backup, VMs without backup, no soft delete |
+| **Azure Backup infrastructure** | Vault count, VM protected items count, SQL protected items count |
 | **Region distribution** | How many resources are in each Azure region |
 | **Storage by service** | Which services consume the most storage, ranked |
+| **Backup sizing summary** | Protectable storage by service type (managed disks, blob, files, ANF, SQL MI) with suggested backup method |
+| **Disk snapshot coverage** | Breakdown of disks by snapshot age — current, aging, stale, no snapshot |
+| **Monthly spend by service** | Top 10 Azure services by current-month cost |
 
 ### Detail sheets (one per service)
 
 | Sheet | What you get |
 |---|---|
-| **Virtual Machines** | Name, size (SKU), OS type, power state, OS disk, data disks, total storage, zones, tags |
+| **Virtual Machines** | Name, size (SKU), OS type, power state, OS disk, data disks, total storage, zones, tags, MSSQL-INSTALLED flag, backup policy name, backup protected status |
 | **Managed Disks** | SKU, size, IOPS, throughput, encryption type, disk state (attached/unattached), attached VM |
 | **Disk Snapshots** | Source disk, size, encryption, creation date, age in days |
-| **Azure SQL** | Server, database, SKU, tier, max storage, backup redundancy, public network access, TDE status |
-| **Storage Accounts** | SKU, kind, HTTPS-only, public blob access, encryption key source, blob size, file size |
-| **Azure NetApp Files** | Account, pool, volume, service level, quota, protocols, snapshot policy |
-| **Cosmos DB** | API kind, consistency level, multi-region write, backup mode and retention, public access |
+| **Azure SQL** | Server, database, SKU, tier, max/allocated/used storage, elastic pool, PITR days, LTR weekly/monthly/yearly retention, backup redundancy, public access, TDE status |
+| **SQL MI Databases** | Managed Instance, database name, license type, vCores, storage, status, collation, earliest restore point, PITR days, LTR weekly/monthly/yearly retention |
+| **SQL Elastic Pools** | Pool name, SKU, tier, eDTUs/vCores, max/allocated/used storage, database count, zone redundancy |
+| **SQL Server VMs** | VMs with SQL Server extension: image offer/SKU, license type, patching day, backup enabled |
+| **Storage Accounts** | SKU, kind, HTTPS-only, public blob access, encryption key source, blob tier breakdown (hot/cool/cold/archive), file size, total size |
+| **Azure File Shares** | Share name, protocol, access tier, quota, used size, UNC/mount path |
+| **Azure NetApp Files** | Account, pool, volume, service level, quota, used size, throughput, protocols, mount path, snapshot details |
+| **Cosmos DB** | API kind, consistency level, multi-region write, backup mode and retention, public access, live data/index size (GiB), document count, partition count |
 | **Synapse Analytics** | Workspace, SQL pool, SKU, status, geo-backup |
-| **AKS** | Cluster version, node pools, total nodes, node VM sizes, network plugin, RBAC |
+| **AKS** | Cluster version, node pools, current/max node count, autoscale flag, node VM sizes, OS disk sizes per pool, network plugin, RBAC |
 | **Container Instances** | Container group, OS type, CPU, memory, state, IP address |
 | **Function Apps** | Runtime, OS type, app service plan, state |
 | **Azure Virtual Desktop** | Host pool type, load balancer, max sessions, session host count |
 | **Redis Cache** | SKU, capacity, Redis version, TLS settings, geo-replication |
 | **Backup Vaults** | Redundancy type, protected items count |
-| **Backup Protected Items** | Vault, item name, item type, protection status, last backup time |
+| **Backup Protected Items** | Vault, item name, item type, protection status, last backup time, policy name |
+| **Backup SQL Items** | SQL Server and SQL database protected items (AzureWorkload) across all vaults: server/instance, database, workload type, protection status, last backup status, policy name |
+| **Backup Policies** | All VM and SQL backup policies across all vaults: schedule frequency, daily/weekly/monthly/yearly retention |
+| **Backup Costs** | Recovery Services Vault spend over the last 30 days per vault, with totals |
+| **Monthly Cloud Spend** | Azure spend by service category for the current month and previous month, with month-over-month change; top services also surfaced on the Summary dashboard |
 
 ---
 
@@ -349,5 +414,9 @@ The full source code is in this repository. There are no compiled binaries, no o
 | File | Purpose |
 |---|---|
 | `azure_assessment.py` | The assessment script |
+| `setup_wizard.py` | Interactive setup wizard — detects OS, installs prerequisites, guides auth and launches the scan |
+| `Start-Assessment.ps1` | Windows launcher — installs Python via winget if missing, then runs the wizard |
+| `start-assessment.sh` | macOS / Linux launcher — installs Python via Homebrew or system package manager if missing, then runs the wizard |
+| `veeam_scenario_builder_template.xlsx` | Template used by `--scenario-builder` to produce a Veeam-compatible import file |
 | `requirements.txt` | Python dependencies |
 | `QUICKSTART.md` | Step-by-step setup guide |
