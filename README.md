@@ -20,13 +20,9 @@ The script is **100% read-only** — it only calls `List*`, `Get*`, and `Describ
 
 ## Prerequisites
 
-**Python 3.10 or later**
+**Python 3.10 or later** — the OS launchers will prompt to install this automatically if missing. To install manually: [python.org/downloads](https://www.python.org/downloads/)
 
-```bash
-pip install -r requirements.txt
-```
-
-**Azure CLI installed and logged in**
+**Azure CLI** — required for authentication.
 
 ```bash
 az login
@@ -35,19 +31,25 @@ az account show   # confirm which subscription is active
 
 If you can run `az account show` and see your subscription, you're ready.
 
+**Python packages**
+
+```bash
+pip install -r requirements.txt
+```
+
 ---
 
 ## Setup wizard (recommended for first-time use)
 
-Use the launcher for your OS — it installs Python automatically if it isn't present, then hands off to the interactive wizard. No prerequisites needed to start.
+Use the launcher for your OS — it checks for Python, installs it if missing, then walks you through everything interactively.
 
 **Windows** — open PowerShell in the project folder:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\Start-Assessment.ps1
 ```
-**Prerequisite:** Python 3.10+ must be installed. Download from [python.org](https://www.python.org/downloads/windows/) — check "Add Python to PATH" during install.
+If Python 3.10+ is not found, the launcher will offer to download and install it automatically from python.org.
 
-**macOS / Linux** (Terminal):
+**macOS / Linux** — open Terminal in the project folder:
 ```bash
 ./start-assessment.sh
 ```
@@ -55,8 +57,7 @@ If the script isn't executable yet:
 ```bash
 chmod +x start-assessment.sh && ./start-assessment.sh
 ```
-
-The launcher checks for Python 3.10+. If it isn't installed it uses `winget` (Windows), Homebrew (macOS), or your system package manager (`apt`, `dnf`, `yum`, `pacman`) to install it automatically, then launches the wizard.
+If Python is missing, the launcher installs it via Homebrew (macOS) or your system package manager (`apt`, `dnf`, `yum`, `pacman`) on Linux.
 
 The wizard walks you through 7 steps:
 1. Python version check with OS-specific upgrade instructions
@@ -412,7 +413,7 @@ The full source code is in this repository. There are no compiled binaries, no o
 |---|---|
 | `azure_assessment.py` | The assessment script |
 | `setup_wizard.py` | Interactive setup wizard — detects OS, installs prerequisites, guides auth and launches the scan |
-| `Start-Assessment.ps1` | Windows launcher — checks for Python 3.10+, then runs the wizard |
+| `Start-Assessment.ps1` | Windows launcher — checks for Python 3.10+, offers to install it automatically if missing, then runs the wizard |
 | `start-assessment.sh` | macOS / Linux launcher — installs Python via Homebrew or system package manager if missing, then runs the wizard |
 | `veeam_scenario_builder_template.xlsx` | Template used by `--scenario-builder` to produce a Veeam-compatible import file |
 | `requirements.txt` | Python dependencies |

@@ -2,15 +2,15 @@
 
 ## Fastest path — Setup Wizard
 
-Use the launcher for your OS. It installs Python automatically if you don't have it, then walks you through everything interactively.
+Use the launcher for your OS. It checks for Python, offers to install it automatically if missing, then walks you through everything interactively.
 
 **Windows** — open PowerShell in the project folder:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\Start-Assessment.ps1
 ```
-**Prerequisite:** Python 3.10+ must be installed. Download from https://www.python.org/downloads/windows/ and check "Add Python to PATH" during install.
+If Python 3.10+ is not found, the launcher will prompt you to download and install it automatically from python.org. Works on Windows 10, Windows 11, and Windows Server.
 
-**macOS / Linux** — open Terminal in the project folder and run:
+**macOS / Linux** — open Terminal in the project folder:
 ```bash
 ./start-assessment.sh
 ```
@@ -18,8 +18,7 @@ If needed, make it executable first:
 ```bash
 chmod +x start-assessment.sh && ./start-assessment.sh
 ```
-
-The launchers automatically install Python via `winget` (Windows), Homebrew (macOS), or your system package manager (Linux) if it isn't already present.
+If Python is missing, the launcher installs it via Homebrew (macOS) or your system package manager — `apt`, `dnf`, `yum`, or `pacman` (Linux).
 
 Or if Python 3.10+ is already installed, run the wizard directly:
 ```bash
