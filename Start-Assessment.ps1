@@ -1,6 +1,5 @@
 # Azure Environment Assessment — Windows Launcher
-# Prerequisite: Python 3.10 or later must be installed and on PATH.
-# Download from https://www.python.org/downloads/windows/
+# If Python 3.10+ is not found, prompts to download and install it automatically.
 #
 # Usage (from PowerShell):
 #   powershell -ExecutionPolicy Bypass -File .\Start-Assessment.ps1
@@ -15,32 +14,66 @@ function Write-Header {
     Write-Host ""
 }
 
+function Write-Step { param($msg) Write-Host "[*] $msg" -ForegroundColor Cyan }
 function Write-Ok   { param($msg) Write-Host "[OK] $msg" -ForegroundColor Green }
 function Write-Fail { param($msg) Write-Host "[X] $msg" -ForegroundColor Red }
+function Write-Warn { param($msg) Write-Host "[!] $msg" -ForegroundColor Yellow }
+
+function Find-Python {
+    foreach ($cmd in @("python", "python3", "py")) {
+        try {
+            $ver = & $cmd --version 2>&1
+            if ($ver -match "Python (\d+)\.(\d+)") {
+                if ([int]$Matches[1] -gt 3 -or ([int]$Matches[1] -eq 3 -and [int]$Matches[2] -ge 10)) {
+                    return $cmd
+                }
+            }
+        } catch { }
+    }
+    return $null
+}
+
+function Install-Python {
+    Write-Step "Downloading Python 3.12 from python.org..."
+    $installer = "$env:TEMP\python-3.12.9-amd64.exe"
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri "https://www.python.org/ftp/python/3.12.9/python-3.12.9-amd64.exe" `
+            -OutFile $installer -UseBasicParsing
+        Write-Step "Installing Python 3.12 (this may take a minute)..."
+        Start-Process $installer -ArgumentList "/quiet InstallAllUsers=1 PrependPath=1 Include_test=0" -Wait
+        # Refresh PATH in this session so python is immediately available
+        $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" +
+                    [System.Environment]::GetEnvironmentVariable("PATH", "User")
+        return $true
+    } catch {
+        Write-Warn "Download or install failed: $_"
+        return $false
+    }
+}
 
 Write-Header
 
-# Find Python 3.10+
-$PYTHON = $null
-foreach ($cmd in @("python", "python3", "py")) {
-    try {
-        $ver = & $cmd --version 2>&1
-        if ($ver -match "Python (\d+)\.(\d+)") {
-            if ([int]$Matches[1] -gt 3 -or ([int]$Matches[1] -eq 3 -and [int]$Matches[2] -ge 10)) {
-                $PYTHON = $cmd
-                break
-            }
-        }
-    } catch { }
-}
+$PYTHON = Find-Python
 
 if ($null -eq $PYTHON) {
-    Write-Fail "Python 3.10 or later not found."
+    Write-Warn "Python 3.10 or later was not found on this machine."
     Write-Host ""
-    Write-Host "  Install Python from https://www.python.org/downloads/windows/" -ForegroundColor Yellow
-    Write-Host "  Check 'Add Python to PATH' during installation, then re-run this script." -ForegroundColor Yellow
-    Write-Host ""
-    exit 1
+    $choice = Read-Host "  Download and install Python 3.12 automatically? [Y/n]"
+    if ($choice -eq "" -or $choice -match "^[Yy]") {
+        $ok = Install-Python
+        if ($ok) {
+            $PYTHON = Find-Python
+        }
+    }
+
+    if ($null -eq $PYTHON) {
+        Write-Host ""
+        Write-Fail "Python not available. Install manually from https://www.python.org/downloads/windows/"
+        Write-Host "  Check 'Add Python to PATH' during installation, then re-run this script." -ForegroundColor Yellow
+        Write-Host ""
+        exit 1
+    }
 }
 
 $verStr = & $PYTHON --version 2>&1
